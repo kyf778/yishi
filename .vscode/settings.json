@@ -1,0 +1,17 @@
+{
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.compile.nullAnalysis.mode": "automatic",
+    "kotlin.languageServer.enabled": true,
+    "kotlin.compiler.jvmTarget": "17",
+    "android.sdkPath": "C:\\Android\\Sdk",
+    "gradle.java.home": "C:\\Program Files\\Java\\jdk-17",
+    "gradle.nestedProjects": false,
+    "files.exclude": {
+        "**/.gradle": true,
+        "**/build": true
+    },
+    "search.exclude": {
+        "**/build": true,
+        "**/.gradle": true
+    }
+}

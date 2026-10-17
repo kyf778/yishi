@@ -1,0 +1,33 @@
+# 忆时 AI 网关 —— 给 free-llm-bridge 加 token 认证并暴露到 NAS。
+# 部署到 NAS 上与 free-llm-bridge 同一 Docker 网络（hindsight_default）。
+# 用法（在 NAS 上执行）：
+#   docker run -d --name yishi-gateway \
+#     --network hindsight_default \
+#     -e YISHI_GATEWAY_TOKEN="$(openssl rand -hex 24)" \
+#     -e UPSTREAM=http://free-llm-bridge:18999 \
+#     -v "$PWD/yishi-gateway.js:/app/yishi-gateway.js:ro" \
+#     node:22-alpine node /app/yishi-gateway.js --port 19000
+services:
+  yishi-gateway:
+    image: node:22-alpine
+    container_name: yishi-gateway
+    working_dir: /app
+    volumes:
+      - ./yishi-gateway.js:/app/yishi-gateway.js:ro
+    command: ["node", "/app/yishi-gateway.js", "--port", "19000"]
+    environment:
+      # ⚠️ 部署前改成强随机值：openssl rand -hex 24
+      YISHI_GATEWAY_TOKEN: "REPLACE_WITH_RANDOM_TOKEN"
+      UPSTREAM: "http://free-llm-bridge:18999"
+    # 只发布到回环；对外暴露交给 tailscale serve/funnel 或 cloudflared。
+    ports:
+      - "127.0.0.1:19000:19000"
+    restart: unless-stopped
+    user: node
+    # 必须加入 free-llm-bridge 所在网络
+    networks:
+      - hindsight_default
+
+networks:
+  hindsight_default:
+    external: true

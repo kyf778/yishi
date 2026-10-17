@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下的自动备份规则（Android 12+ 改用 data_extraction_rules.xml）。
+
+  忆时的数据全是用户自己记的东西，没有理由不备份。
+  include 全部三类：数据库（卡片本体）、文件（截图副本）、设置（偏好）。
+-->
+<full-backup-content>
+    <include domain="database" path="." />
+    <include domain="file" path="." />
+    <include domain="sharedpref" path="." />
+</full-backup-content>

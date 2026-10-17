@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Android Debug",
+            "type": "android",
+            "request": "launch",
+            "appSrcRoot": "${workspaceRoot}/app/src/main",
+            "adbPort": 5037,
+            "autoStartADB": true,
+            "targetDevice": "a098eb68",
+            "launchActivity": "com.kyf778.yishi.MainActivity"
+        }
+    ]
+}

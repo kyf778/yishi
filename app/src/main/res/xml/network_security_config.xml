@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  忆时 AI 访问策略说明：
+  - 网关(yishi-gateway)通过 Tailscale 隧道暴露，隧道内是 WireGuard 端到端加密，
+    因此 HTTP 明文在隧道内传输是安全的（token 不会暴露给公网明文）。
+  - 若改用 HTTPS 网关（tailscale serve/funnel 或 Cloudflare Tunnel），
+    建议把 cleartextTrafficPermitted 改回 false，只保留 HTTPS。
+  - 不全局禁用明文的原因：Tailscale IP 是 100.x 网段，network security config
+    的 <domain> 无法按 CIDR 匹配 IP，全局禁明文会导致手机连不上 Tailscale 网关。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

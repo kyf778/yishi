@@ -1,0 +1,22 @@
+# Android
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# APK 产物（GitHub 不放大文件，发布时用 Release 附件）
+*.apk
+!fastlane/**
+
+# 密钥（绝不入库）
+*.jks
+*.keystore
+
+# 日志与临时
+*.log
+*.tmp
