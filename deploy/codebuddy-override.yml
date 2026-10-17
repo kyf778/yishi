@@ -1,0 +1,27 @@
+  # ── CodeBuddy（腾讯「WorkBuddy 国内版」）积分模型桥 ──────────────
+  # 把 CodeBuddy 的积分模型包装成标准 OpenAI 端点。
+  #
+  # 为什么需要这一层（均为实测踩坑）：
+  #   1. CodeBuddy 强制 stream:true，非流式直接 400/11101
+  #   2. 必须带 X-Product / X-Product-Code / X-Conversation-* 等身份头
+  #   3. messages[0] 必须是 system，否则 400/11128
+  #   4. 图片必须和文字在同一条 user 消息里
+  #   5. token 会过期，需按 refresh_token 静默续期
+  #
+  # 无 ports 段：只走 compose 内部网络，由 yishi-gateway 转发出去。
+  codebuddy-bridge:
+    image: node:22-alpine
+    container_name: codebuddy-bridge
+    command: ["node", "/app/codebuddy-bridge.js", "--port", "19001", "--credential", "/app/credential.json"]
+    environment:
+      - HOST=0.0.0.0
+      - DEFAULT_MODEL=hy3
+      - UPSTREAM_TIMEOUT_MS=300000
+    volumes:
+      - ./codebuddy-bridge.js:/app/codebuddy-bridge.js:ro
+      # 凭据读写：续期后要把新 token 写回
+      - ./codebuddy-credential.json:/app/credential.json
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - default
