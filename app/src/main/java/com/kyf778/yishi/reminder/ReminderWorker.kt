@@ -61,28 +61,6 @@ class ReminderWorker(
                 Intent(context, MainActivity::class.java).putExtra(MainActivity.EXTRA_EVENT_ID, event.id),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            // 「完成了」：直接把事项标记完成并撤掉通知
-            val doneIntent = PendingIntent.getBroadcast(
-                context,
-                notificationId + 1,
-                Intent(context, ReminderReceiver::class.java).apply {
-                    this.action = ReminderReceiver.ACTION_DONE
-                    putExtra(ReminderReceiver.EXTRA_EVENT_ID, event.id)
-                    putExtra(ReminderReceiver.EXTRA_NOTIFICATION_ID, notificationId)
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-            // 「稍后」：10 分钟后再发一条
-            val snoozeIntent = PendingIntent.getBroadcast(
-                context,
-                notificationId + 2,
-                Intent(context, ReminderReceiver::class.java).apply {
-                    this.action = ReminderReceiver.ACTION_SNOOZE
-                    putExtra(ReminderReceiver.EXTRA_REMINDER_ID, reminder.id)
-                    putExtra(ReminderReceiver.EXTRA_NOTIFICATION_ID, notificationId)
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
 
             val leadText = when {
                 reminder.offsetMinutes <= 0 -> "现在到截止时间了"
@@ -93,31 +71,31 @@ class ReminderWorker(
             val dueText = formatDue(card.deadlineAt)
             val summary = card.summary.trim()
 
-            // 越临近越显眼：≤30 分钟走高优先级渠道（会弹横幅），否则普通通知
-            val urgent = reminder.offsetMinutes <= 30
-            val channel = if (urgent) ReminderReceiver.CHANNEL_URGENT else ReminderReceiver.CHANNEL_REMINDER
+            // 所有提醒都弹横幅（用户要求）：统一走一个 HIGH 渠道，
+            // 不再按剩余时间分「安静/醒目」——差别只在文案上。
+            val channel = ReminderReceiver.CHANNEL_URGENT
 
-            val notification = NotificationCompat.Builder(context, channel)
+            val builder = NotificationCompat.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_stat_yishi)
                 .setContentTitle(card.title)
+                // 副标题：「还有 1 小时截止 · 今天 16:00」
                 .setContentText("$leadText · $dueText")
-                .setPriority(if (urgent) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setAutoCancel(true)
                 .setContentIntent(open)
                 .setShowWhen(true)
-                .setStyle(
-                    NotificationCompat.BigTextStyle().bigText(
-                        buildString {
-                            append(leadText).append(" · ").append(dueText)
-                            if (summary.isNotBlank()) append("\n").append(summary)
-                        },
-                    ),
+
+            // 展开后只补「副标题里没有的信息」。
+            // 之前这里把 leadText + dueText 又拼了一遍，展开就是副标题的复读机。
+            // 有摘要才用 BigTextStyle；没有摘要就让系统按普通通知显示（只有副标题）。
+            if (summary.isNotBlank()) {
+                builder.setStyle(
+                    NotificationCompat.BigTextStyle().bigText(summary),
                 )
-                .addAction(0, "完成了", doneIntent)
-                .addAction(0, "稍后 ${ReminderReceiver.SNOOZE_MINUTES} 分钟", snoozeIntent)
-                .addAction(0, "打开", open)
-                .build()
+            }
+
+            val notification = builder.build()
             NotificationManagerCompat.from(context).notify(notificationId, notification)
 
             dao.insertNotificationLog(

@@ -16,15 +16,21 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,6 +41,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -45,6 +52,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
@@ -52,6 +61,8 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -157,6 +168,12 @@ private fun YishiApp() {
     val tagEntities by repository.observeTags().collectAsStateWithLifecycle(emptyList())
     // 批量操作选中的 eventId
     var batchSelected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    // 待确认的动作（防止误删/误完成）：null 表示没有待确认项
+    var deleteTarget by remember { mutableStateOf<CountdownCard?>(null) }
+    var completeTarget by remember { mutableStateOf<CountdownCard?>(null) }
+    var batchDeletePending by remember { mutableStateOf(false) }
+    var batchCompletePending by remember { mutableStateOf(false) }
+    var restoreTarget by remember { mutableStateOf<CountdownCard?>(null) }
 
     // 进入前台就刷新逾期状态并重新排提醒：只跑一次的话，App 长期挂在后台时
     // 事项会一直显示"还剩 x 天"而不会变成"已逾期"。
@@ -215,31 +232,20 @@ private fun YishiApp() {
                     0 -> CountdownHome(
                         padding = padding,
                         cards = cards,
-                        allTags = tagEntities.map { it.name },
                         selected = batchSelected,
                         onToggleSelect = { eventId ->
                             batchSelected = if (eventId in batchSelected) batchSelected - eventId else batchSelected + eventId
                         },
                         onClearSelection = { batchSelected = emptySet() },
-                        onBatchDone = {
-                            val ids = batchSelected
-                            batchSelected = emptySet()
-                            scope.launch { repository.completeMany(ids) }
-                        },
-                        onBatchArchive = {
-                            val ids = batchSelected
-                            batchSelected = emptySet()
-                            scope.launch { repository.archiveMany(ids) }
-                        },
-                        onBatchDelete = {
-                            val ids = batchSelected
-                            batchSelected = emptySet()
-                            scope.launch { repository.deleteMany(ids) }
-                        },
+                        onBatchDone = { batchCompletePending = true },
+                        onBatchDelete = { batchDeletePending = true },
                         onSelect = { selected = it },
                         onImport = { showImport = true },
                     )
-                    1 -> StatisticsPage(padding, statuses, types, pastCards)
+                    1 -> StatisticsPage(
+                        padding, statuses, types, pastCards,
+                        onRestore = { restoreTarget = it },
+                    )
                     else -> NotificationLogPage(padding, logs)
                 }
             }
@@ -268,12 +274,10 @@ private fun YishiApp() {
         DetailDialog(
             card = card,
             onDismiss = { selected = null },
-            onComplete = {
-                scope.launch { repository.complete(card.eventId); selected = null }
-            },
+            onComplete = { completeTarget = card },
             onEdit = { editing = card; selected = null },
-            onArchive = {
-                scope.launch { repository.archive(card.eventId); selected = null }
+            onDelete = {
+                deleteTarget = card
             },
         )
     }
@@ -290,63 +294,118 @@ private fun YishiApp() {
             },
         )
     }
+
+    // ════════ 确认对话框（防误操作）════════
+
+    // 删除单条
+    deleteTarget?.let { card ->
+        ConfirmDialog(
+            title = "删除这个事项？",
+            message = "「${card.title}」将从列表移除，可在「统计 → 已完成」里找回。",
+            confirmText = "删除",
+            danger = true,
+            onConfirm = {
+                scope.launch { repository.delete(card.eventId); selected = null }
+                deleteTarget = null
+            },
+            onDismiss = { deleteTarget = null },
+        )
+    }
+
+    // 完成单条
+    completeTarget?.let { card ->
+        ConfirmDialog(
+            title = "标记为已完成？",
+            message = "「${card.title}」会移到「统计 → 已完成」，之后可以恢复。",
+            confirmText = "已完成",
+            danger = false,
+            onConfirm = {
+                scope.launch { repository.complete(card.eventId); selected = null }
+                completeTarget = null
+            },
+            onDismiss = { completeTarget = null },
+        )
+    }
+
+    // 批量删除
+    if (batchDeletePending) {
+        ConfirmDialog(
+            title = "删除 ${batchSelected.size} 个事项？",
+            message = "这些事项将从列表移除，可在「统计 → 已完成」里找回。",
+            confirmText = "全部删除",
+            danger = true,
+            onConfirm = {
+                val ids = batchSelected
+                batchSelected = emptySet()
+                batchDeletePending = false
+                scope.launch { repository.deleteMany(ids) }
+            },
+            onDismiss = { batchDeletePending = false },
+        )
+    }
+
+    // 批量完成
+    if (batchCompletePending) {
+        ConfirmDialog(
+            title = "标记 ${batchSelected.size} 个为已完成？",
+            message = "它们会移到「统计 → 已完成」，之后可以恢复。",
+            confirmText = "全部已完成",
+            danger = false,
+            onConfirm = {
+                val ids = batchSelected
+                batchSelected = emptySet()
+                batchCompletePending = false
+                scope.launch { repository.completeMany(ids) }
+            },
+            onDismiss = { batchCompletePending = false },
+        )
+    }
+
+    // 恢复
+    restoreTarget?.let { card ->
+        ConfirmDialog(
+            title = "恢复这个事项？",
+            message = "「${card.title}」会回到倒计时列表。若截止时间还没到，提醒也会重新排上。",
+            confirmText = "恢复",
+            danger = false,
+            onConfirm = {
+                scope.launch { repository.restore(card.eventId) }
+                restoreTarget = null
+            },
+            onDismiss = { restoreTarget = null },
+        )
+    }
+
     if (showSettings) SettingsDialog(onDismiss = { showSettings = false })
 }
 
-/** 列表排序方式。 */
-private enum class SortMode(val label: String) {
-    DEADLINE("按截止时间"),
-    CREATED("按创建时间"),
-    TITLE("按标题"),
-}
-
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun CountdownHome(
     padding: PaddingValues,
     cards: List<CountdownCard>,
-    allTags: List<String>,
     selected: Set<Long>,
     onToggleSelect: (Long) -> Unit,
     onClearSelection: () -> Unit,
     onBatchDone: () -> Unit,
-    onBatchArchive: () -> Unit,
     onBatchDelete: () -> Unit,
     onSelect: (CountdownCard) -> Unit,
     onImport: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    var sortMode by rememberSaveable { mutableStateOf(SortMode.DEADLINE) }
-    var tagFilter by rememberSaveable { mutableStateOf<String?>(null) }
     val context = LocalContext.current
 
-    // 标签 → 该标签下的记忆 id（用于按标签筛选）
-    val tagIndex by produceState<Map<String, Set<Long>>>(emptyMap(), allTags) {
-        val repo = MemoryRepository(AppDatabase.get(context))
-        val map = mutableMapOf<String, Set<Long>>()
-        allTags.forEach { name ->
-            map[name] = runCatching { repo.memoryIdsForTag(name) }.getOrDefault(emptySet())
-        }
-        value = map
-    }
-
-    // 先筛后排：搜索匹配标题/摘要，标签过滤按 memoryId
-    val visible = remember(cards, query, sortMode, tagFilter, tagIndex) {
+    // 只按搜索词过滤（标题+备注），固定按截止时间排序
+    val visible = remember(cards, query) {
         val q = query.trim()
         var filtered = cards
-        if (tagFilter != null) {
-            val allow = tagIndex[tagFilter] ?: emptySet()
-            filtered = filtered.filter { it.memoryId in allow }
-        }
         if (q.isNotBlank()) {
             filtered = filtered.filter {
                 it.title.contains(q, ignoreCase = true) || it.summary.contains(q, ignoreCase = true)
             }
         }
-        when (sortMode) {
-            SortMode.DEADLINE -> filtered.sortedBy { it.deadlineAt }
-            SortMode.CREATED -> filtered.sortedByDescending { it.createdAt }
-            SortMode.TITLE -> filtered.sortedBy { it.title }
-        }
+        // 固定按截止时间升序（最早的排最前）
+        filtered.sortedBy { it.deadlineAt }
     }
 
     val inSelectMode = selected.isNotEmpty()
@@ -372,9 +431,9 @@ private fun CountdownHome(
             return@Column
         }
 
-        // 搜索 + 排序条（事项少于一屏时也显示，保持一致的操作位置）
+        // 搜索 + 排序条：紧凑高度（56dp 一行），上下留白收窄
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -386,53 +445,15 @@ private fun CountdownHome(
                 leadingIcon = { Icon(Icons.Default.Search, null, modifier = Modifier.size(18.dp)) },
                 trailingIcon = {
                     if (query.isNotBlank()) {
-                        IconButton(onClick = { query = "" }) {
+                        IconButton(onClick = { query = "" }, modifier = Modifier.size(28.dp)) {
                             Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp))
                         }
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(12.dp),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
             )
-            // 排序：点一下循环切换
-            OutlinedButton(
-                onClick = {
-                    sortMode = when (sortMode) {
-                        SortMode.DEADLINE -> SortMode.CREATED
-                        SortMode.CREATED -> SortMode.TITLE
-                        SortMode.TITLE -> SortMode.DEADLINE
-                    }
-                },
-                shape = RoundedCornerShape(12.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-                Icon(Icons.Default.List, null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(sortMode.label, fontSize = 12.sp)
-            }
-        }
-
-        // 标签筛选条（只在有标签时显示）
-        if (allTags.isNotEmpty()) {
-            LazyRow(
-                Modifier.fillMaxWidth().padding(start = 16.dp, top = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                item {
-                    FilterChipLike(
-                        text = "全部",
-                        on = tagFilter == null,
-                        onClick = { tagFilter = null },
-                    )
-                }
-                items(allTags, key = { it }) { name ->
-                    FilterChipLike(
-                        text = "#$name",
-                        on = tagFilter == name,
-                        onClick = { tagFilter = if (tagFilter == name) null else name },
-                    )
-                }
-            }
         }
 
         // 批量操作条（有选中项时出现）
@@ -441,21 +462,26 @@ private fun CountdownHome(
                 Modifier.fillMaxWidth()
                     .padding(start = 16.dp, end = 16.dp, top = 8.dp)
                     .background(Color(0xFFEEF1FF), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("已选 ${selected.size} 项", fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                TextButton(onClick = onBatchDone) { Text("完成", fontSize = 13.sp) }
-                TextButton(onClick = onBatchArchive) { Text("归档", fontSize = 13.sp) }
-                TextButton(onClick = onBatchDelete) { Text("删除", fontSize = 13.sp, color = Color(0xFFD55245)) }
-                TextButton(onClick = onClearSelection) { Text("取消", fontSize = 13.sp) }
+                Text(
+                    "已选 ${selected.size} 项",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(start = 8.dp).weight(1f),
+                )
+                // TextButton 自带上下 12dp 内边距，用 contentPadding 压扁
+                BatchAction("完成", Color(0xFF4F6BFF), onBatchDone)
+                BatchAction("删除", Color(0xFFD55245), onBatchDelete)
+                BatchAction("取消", Color(0xFF7C8495), onClearSelection)
             }
         }
 
         if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (tagFilter != null) "「#$tagFilter」下没有事项" else "没有匹配「$query」的事项",
+                    "没有匹配「$query」的事项",
                     color = Color.Gray, fontSize = 14.sp,
                 )
             }
@@ -463,18 +489,51 @@ private fun CountdownHome(
         }
 
         LazyColumn(
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 90.dp),
+            // 批量模式下左侧让出 26dp 给对勾，卡片不缩进就压住内容了
+            contentPadding = PaddingValues(
+                start = if (inSelectMode) 4.dp else 16.dp,
+                end = 16.dp,
+                top = 12.dp,
+                bottom = 90.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             items(visible, key = { it.eventId }) { card ->
+                val inBatch = card.eventId in selected
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 勾选进入批量模式；不勾选时点卡片看详情
-                    Checkbox(
-                        checked = card.eventId in selected,
-                        onCheckedChange = { onToggleSelect(card.eventId) },
-                    )
-                    Box(Modifier.weight(1f)) {
-                        CountdownCardView(card, onClick = { onSelect(card) })
+                    // 选中标记：卡片左侧**独立一列**，绝不压内容
+                    if (inSelectMode) {
+                        Icon(
+                            if (inBatch) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                            null,
+                            tint = if (inBatch) Color(0xFF4F6BFF) else Color(0xFFC5CBD8),
+                            modifier = Modifier
+                                .padding(start = 6.dp, end = 6.dp)
+                                .size(24.dp),
+                        )
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .combinedClickable(
+                                // 长按进入批量模式（并选中这一张）
+                                onLongClick = { onToggleSelect(card.eventId) },
+                                // 批量模式下单击=勾选/取消；正常模式单击=看详情
+                                onClick = {
+                                    if (inSelectMode) onToggleSelect(card.eventId) else onSelect(card)
+                                },
+                            )
+                    ) {
+                        // 选中时的蓝色描边（画在卡片上，不占布局）
+                        if (inSelectMode && inBatch) {
+                            Box(
+                                Modifier
+                                    .matchParentSize()
+                                    .padding(1.dp)
+                                    .border(2.5.dp, Color(0xFF4F6BFF), RoundedCornerShape(20.dp)),
+                            )
+                        }
+                        CountdownCardView(card)
                     }
                 }
             }
@@ -482,21 +541,45 @@ private fun CountdownHome(
     }
 }
 
-/** 简易筛选标签（Material3 的 FilterChip 在部分版本 API 不稳定，这里自己画）。 */
+
+/**
+ * 统一的二次确认对话框。
+ * 删除这类不可逆操作用 danger=true（红色按钮），完成/恢复用普通色。
+ */
 @Composable
-private fun FilterChipLike(text: String, on: Boolean, onClick: () -> Unit) {
-    Text(
-        text,
-        fontSize = 12.sp,
-        color = if (on) Color.White else Color(0xFF5A6376),
-        modifier = Modifier
-            .background(
-                if (on) Color(0xFF4F6BFF) else Color(0xFFEDEFF4),
-                RoundedCornerShape(14.dp),
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+private fun ConfirmDialog(
+    title: String,
+    message: String,
+    confirmText: String,
+    danger: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold) },
+        text = { Text(message, fontSize = 14.sp, lineHeight = 20.sp) },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (danger) Color(0xFFD55245) else Color(0xFF4F6BFF),
+                ),
+            ) { Text(confirmText, color = Color.White) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** 批量操作条里的文字按钮：压扁内边距，让整条只有约 36dp 高。 */
+@Composable
+private fun BatchAction(text: String, color: Color, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(text, fontSize = 13.sp, color = color)
+    }
 }
 
 /** 每类事项配一套渐变，视觉上区分类型，也避免整屏都是同一个颜色。 */
@@ -535,22 +618,46 @@ private fun formatRemaining(millis: Long): Pair<String, String> {
     }
 }
 
-/** 「今天 14:30」「明天 09:00」「10月21日 16:00」——比纯数字更直观。 */
+/**
+ * 判断这个截止时间是不是"只精确到天"。
+ *
+ * 约定：DeadlineParser 把纯日期（如"10月20日"）补成当天 23:59。
+ * 所以看到 23:59 就说明原始信息里没有具体钟点，显示时不该把这个补出来的
+ * 假时间露出来——用户看到"后天 23:59"会以为真有人在那个点截止。
+ */
+private fun isDayOnly(value: Long): Boolean {
+    val t = java.time.Instant.ofEpochMilli(value).atZone(ZoneId.systemDefault())
+    return t.hour == 23 && t.minute == 59 && t.second == 0
+}
+
+/**
+ * 卡片是否只精确到日。
+ * 优先用数据库里的 dateOnly 字段（LLM/用户显式标记），
+ * 兜底才用「时间是不是 23:59」去猜（兼容老数据）。
+ */
+private fun CountdownCard.isDateOnly(): Boolean = dateOnly || isDayOnly(deadlineAt)
+
+/** 「今天 14:30」「明天」「10月21日 16:00」「10月21日」——比纯数字更直观。 */
 private fun formatDeadlineFriendly(value: Long): String {
     val zone = ZoneId.systemDefault()
     val target = java.time.Instant.ofEpochMilli(value).atZone(zone)
     val today = java.time.LocalDate.now(zone)
-    val time = target.format(DateTimeFormatter.ofPattern("HH:mm"))
+    // 纯日期（LLM 只给了"10月20日"这种）：一律显示「10月20日」，
+    // 不写"后天"这类相对说法，也不写任何钟点。
+    if (isDayOnly(value)) {
+        return target.format(DateTimeFormatter.ofPattern("M月d日"))
+    }
+    val time = target.format(DateTimeFormatter.ofPattern(" HH:mm"))
     return when (target.toLocalDate()) {
-        today -> "今天 $time"
-        today.plusDays(1) -> "明天 $time"
-        today.plusDays(2) -> "后天 $time"
+        today -> "今天$time"
+        today.plusDays(1) -> "明天$time"
+        today.plusDays(2) -> "后天$time"
         else -> target.format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
     }
 }
 
 @Composable
-private fun CountdownCardView(card: CountdownCard, onClick: () -> Unit) {
+private fun CountdownCardView(card: CountdownCard) {
     val now = System.currentTimeMillis()
     val remaining = card.deadlineAt - now
     val overdue = remaining < 0L || card.status == "OVERDUE"
@@ -574,8 +681,7 @@ private fun CountdownCardView(card: CountdownCard, onClick: () -> Unit) {
             .fillMaxWidth()
             .heightIn(min = 128.dp)
             .clip(RoundedCornerShape(20.dp))
-            .background(Brush.linearGradient(theme.colors))
-            .clickable(onClick = onClick),
+            .background(Brush.linearGradient(theme.colors)),
     ) {
         // 右上角装饰（月亮 / 星点），模仿番茄的夜空感
         Canvas(Modifier.fillMaxSize()) {
@@ -794,6 +900,7 @@ private fun ImportDialog(onDismiss: () -> Unit, onSaved: () -> Unit) {
             eventType = normalizeEventType(item.eventType),
             priority = defaultPriorityFor(item.eventType),
             remindersMinutes = suggested.ifEmpty { listOf(1440, 60) },
+            dateOnly = item.dateOnly,
             tagNames = tagsFor(item),
         )
         repository.futureReminders().filter { it.eventId == eventId }.forEach(scheduler::schedule)
@@ -1198,13 +1305,17 @@ private fun ImportDialog(onDismiss: () -> Unit, onSaved: () -> Unit) {
 }
 
 /**
- * 事项详情。
+ * 事项详情 —— 仿番茄 ToDo：一张中等大小的深色卡。
  *
- * 除了基本信息，这里把之前「数据库有、界面没有」的都显示出来：
- *   - 提醒计划：「它会在什么时候提醒我」（reminder_rule 表）
- *   - 优先级：可直接改（countdown_event.priority）
- *   - 标签：识别时自动打的（tag / memory_tag 表）
- *   - AI 识别记录：可折叠查看「AI 当时认出了什么」（ai_parse_record 表）
+ * 结构（自上而下）：
+ *   工具栏（左：关闭；右：编辑/删除）—— 一行内左右分开，不重叠
+ *   回显条：标题 + 截止时间 + 还有 N 天
+ *   备注（主题下面的具体内容）
+ *   已完成按钮
+ *   建立时间（底部小字）
+ *
+ * 相比上一版去掉了：中间那行重复的大标题（和回显条重复）、
+ * 过高的卡片（从 88% 高改成自适应，内容多少就多高）。
  */
 @Composable
 private fun DetailDialog(
@@ -1212,132 +1323,149 @@ private fun DetailDialog(
     onDismiss: () -> Unit,
     onComplete: () -> Unit,
     onEdit: () -> Unit,
-    onArchive: () -> Unit,
+    onDelete: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val repository = remember { MemoryRepository(AppDatabase.get(context)) }
-    var plan by remember { mutableStateOf<List<com.kyf778.yishi.data.ReminderRuleEntity>>(emptyList()) }
-    var tags by remember { mutableStateOf<List<String>>(emptyList()) }
-    var aiRecord by remember { mutableStateOf<com.kyf778.yishi.data.AiParseRecordEntity?>(null) }
-    var priority by remember(card.eventId) { mutableStateOf(card.priority) }
-    var showAi by remember { mutableStateOf(false) }
-
-    LaunchedEffect(card.eventId) {
-        plan = repository.reminderPlanFor(card.eventId)
-        tags = repository.tagNamesFor(card.memoryId)
-        aiRecord = repository.latestAiRecordFor(card.memoryId)
-    }
-
-    AlertDialog(
+    val theme = themeFor(card.eventType, card.status == "OVERDUE")
+    Dialog(
         onDismissRequest = onDismiss,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(card.title, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                PriorityChip(priority)
-            }
-        },
-        text = {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0x99000000))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
             Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.verticalScroll(rememberScrollState()),
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .background(Brush.linearGradient(theme.colors), RoundedCornerShape(24.dp))
+                    .clickable(enabled = false) {},
             ) {
-                Text("截止：${formatDeadlineFriendly(card.deadlineAt)}")
-                Text(
-                    card.summary.ifBlank { "暂无备注" },
-                    color = if (card.summary.isBlank()) Color.Gray else Color.Unspecified,
-                    fontSize = 13.sp,
-                )
-
-                // ── 优先级 ──
-                Text("优先级", fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(1 to "急", 2 to "普通", 3 to "不急").forEach { (level, label) ->
-                        val on = priority == level
-                        TextButton(
-                            onClick = {
-                                priority = level
-                                scope.launch { repository.setPriority(card.eventId, level) }
-                            },
-                        ) {
-                            Text(
-                                label,
-                                color = if (on) Color(0xFF4F6BFF) else Color.Gray,
-                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                            )
-                        }
-                    }
+                // ── 工具栏：左关闭、右三个操作，两端分开不重叠 ──
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    DetailIconButton(Icons.Default.Close, "关闭", onDismiss)
+                    Spacer(Modifier.weight(1f))
+                    DetailIconButton(Icons.Default.Edit, "编辑", onEdit)
+                    Spacer(Modifier.width(4.dp))
+                    DetailIconButton(Icons.Default.Delete, "删除", onDelete)
                 }
 
-                // ── 标签 ──
-                if (tags.isNotEmpty()) {
-                    Text("标签", fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
-                    Text(tags.joinToString("  ") { "#$it" }, color = Color(0xFF4F6BFF), fontSize = 13.sp)
-                }
-
-                // ── 提醒计划：它到底什么时候会响 ──
-                Text("提醒计划", fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
-                if (plan.isEmpty()) {
-                    Text("没有安排提醒（可能时间已过）", color = Color.Gray, fontSize = 12.sp)
-                } else {
-                    plan.forEach { r ->
+                // ── 回显条：标题 + 截止 + 还有 N 天 ──
+                Row(
+                    Modifier.fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            "· ${formatDeadlineFriendly(r.triggerAt)}" +
-                                (if (r.offsetMinutes > 0) "（提前 ${formatOffset(r.offsetMinutes)}）" else "（到点）") +
-                                if (r.state == "FIRED") " 已提醒" else "",
+                            card.title,
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            formatDeadlineFriendly(card.deadlineAt),
+                            color = Color.White.copy(alpha = 0.72f),
                             fontSize = 12.sp,
-                            color = if (r.state == "FIRED") Color(0xFF7C8495) else Color.Unspecified,
+                            modifier = Modifier.padding(top = 2.dp),
                         )
                     }
-                }
-
-                // ── AI 识别记录 ──
-                aiRecord?.let { rec ->
-                    TextButton(onClick = { showAi = !showAi }, contentPadding = PaddingValues(0.dp)) {
-                        Text(if (showAi) "▾ AI 识别详情" else "▸ AI 识别详情", fontSize = 13.sp)
-                    }
-                    if (showAi) {
-                        Text("模型：${rec.model}", fontSize = 11.sp, color = Color.Gray)
-                        Text(
-                            "置信度：${rec.confidence?.let { "%.0f%%".format(it * 100) } ?: "—"}",
-                            fontSize = 11.sp, color = Color.Gray,
-                        )
-                        rec.resultJson?.let {
-                            Text("识别内容：$it", fontSize = 11.sp, color = Color(0xFF7C8495))
+                    val remain = formatRemaining(card.deadlineAt - System.currentTimeMillis())
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("还有", color = Color.White.copy(alpha = 0.72f), fontSize = 12.sp)
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(remain.first, color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(3.dp))
+                            Text(remain.second, color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
                         }
                     }
                 }
+
+                // ── 备注：主题下面的具体内容 ──
+                if (card.summary.isNotBlank()) {
+                    Text(
+                        card.summary,
+                        color = Color.White.copy(alpha = 0.88f),
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 8.dp, bottom = 4.dp),
+                    )
+                }
+
+                // ── 已完成按钮 ──
+                Button(
+                    onClick = onComplete,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 16.dp)
+                        .height(44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.94f)),
+                ) {
+                    Icon(Icons.Default.Check, null, tint = Color(0xFF2E3A8C), modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("已完成", color = Color(0xFF2E3A8C), fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
+
+                // ── 建立时间（底部小字，学番茄）──
+                Text(
+                    "建立于 ${formatCreatedAt(card.createdAt)}",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 14.dp),
+                )
             }
-        },
-        confirmButton = { Button(onClick = onComplete) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(4.dp)); Text("完成") } },
-        dismissButton = {
-            Row {
-                TextButton(onClick = onEdit) { Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(2.dp)); Text("编辑") }
-                TextButton(onClick = onArchive) { Icon(Icons.Default.Archive, null, modifier = Modifier.size(16.dp)); Text("归档") }
-                TextButton(onClick = onDismiss) { Text("关闭") }
-            }
-        },
-    )
+        }
+    }
 }
 
-/** 优先级小标签（详情页标题右侧）。 */
-@Composable
-private fun PriorityChip(priority: Int) {
-    val (text, color) = when (priority) {
-        1 -> "急" to Color(0xFFD55245)
-        2 -> "普通" to Color(0xFF4F6BFF)
-        else -> "不急" to Color(0xFF7C8495)
-    }
-    Text(
-        text,
-        color = color,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier
-            .background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
+/** 建立时间：日期格式（卡片没有 createdAt 时退回截止时间所在日期）。 */
+private fun formatCreatedAt(createdAt: Long): String {
+    val millis = if (createdAt > 0) createdAt else System.currentTimeMillis()
+    return java.time.Instant.ofEpochMilli(millis)
+        .atZone(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("yyyy.MM.dd"))
 }
+
+/**
+ * 详情卡顶部的图标按钮。
+ *
+ * 不加圆形底色：半透明白底叠在深色渐变卡上会糊成一团阴影，
+ * 看起来又脏又挡字。纯白图标直接放在卡上才干净（番茄也是这么做的）。
+ */
+@Composable
+private fun DetailIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    desc: String,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(40.dp),
+    ) {
+        Icon(icon, desc, tint = Color.White, modifier = Modifier.size(21.dp))
+    }
+}
+
+/** 提前量说成人话。 */
+
+/** 提前量说成人话。 */
+
+/** 提前量说成人话。 */
 
 /** 提前量说成人话。 */
 private fun formatOffset(minutes: Int): String = when {
@@ -1399,7 +1527,7 @@ private fun EditDialog(card: CountdownCard, onDismiss: () -> Unit, onSave: (Stri
 private fun statusLabel(status: String): String = when (status) {
     "UPCOMING" -> "进行中"
     "COMPLETED" -> "已完成"
-    "CANCELLED" -> "已归档"
+    "CANCELLED" -> "已删除"
     "OVERDUE" -> "已逾期"
     else -> status
 }
@@ -1420,6 +1548,7 @@ private fun StatisticsPage(
     statuses: List<com.kyf778.yishi.data.StatusCount>,
     types: List<com.kyf778.yishi.data.TypeCount>,
     pastCards: List<CountdownCard>,
+    onRestore: (CountdownCard) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("事项状态分布", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
@@ -1445,17 +1574,17 @@ private fun StatisticsPage(
             }
         }
 
-        // 历史：完成/归档的事项不消失，放这里随时回看
+        // 历史：已完成的事项不消失，放这里随时回看（可恢复）
         item {
             Text(
-                "已完成 / 已归档（${pastCards.size} 条）",
+                "已完成（${pastCards.size} 条）",
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
                 modifier = Modifier.padding(top = 20.dp),
             )
         }
         if (pastCards.isEmpty()) {
-            item { Text("还没有完成或归档的事项", color = Color.Gray, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp)) }
+            item { Text("还没有已完成的事项", color = Color.Gray, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp)) }
         } else {
             items(pastCards, key = { "past-${it.eventId}" }) { card ->
                 val done = card.status == "COMPLETED"
@@ -1474,11 +1603,16 @@ private fun StatisticsPage(
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            if (done) "已完成" else "已归档",
+                            if (done) "已完成" else "已删除",
                             color = if (done) Color(0xFF2E9184) else Color(0xFF7C8495),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                         )
+                        // 恢复：把事项放回倒计时列表
+                        TextButton(
+                            onClick = { onRestore(card) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        ) { Text("恢复", fontSize = 12.sp, color = Color(0xFF4F6BFF)) }
                     }
                     Text(
                         "截止 ${formatDeadlineFriendly(card.deadlineAt)}",
@@ -1584,7 +1718,6 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
     var baseUrl by remember(config.baseUrl) { mutableStateOf(config.baseUrl) }
     var apiKey by remember(config.apiKey) { mutableStateOf(config.apiKey) }
     var model by remember(config.model) { mutableStateOf(config.model) }
-    var selfTestResult by remember { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("AI 与提醒设置") },
@@ -1593,17 +1726,7 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
-                // ── 数据说明：数据只在本机；正常覆盖更新不会丢，卸载才会清掉 ──
-                Text("数据保存", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                Text(
-                    "你的事项保存在本机数据库里。正常更新（覆盖安装）不会丢失；" +
-                        "只有卸载 App 或手动「清除数据」才会清空——那是系统行为，属于正常现象。",
-                    fontSize = 12.sp,
-                    color = Color.Gray,
-                )
-
-                // ── 提醒可靠性：这三项直接决定"到点会不会响" ──
-                Text("提醒可靠性", fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(top = 12.dp))
+                // ── 提醒可靠性：有问题的项才显示（像其它 App 一样，正常时保持安静）──
                 ReminderHealthCheck(context)
 
                 Text(
@@ -1619,16 +1742,6 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
                 // 让用户能立刻看到"提醒到点时长什么样"，不用等真到点
                 TextButton(onClick = { sendTestNotification(context) }) {
                     Text("发送一条测试通知（看看提醒长什么样）")
-                }
-                // 开发期自检：验证标签/优先级/AI记录/提醒建议是否真的落库
-                TextButton(onClick = {
-                    scope.launch {
-                        selfTestResult = runCatching { com.kyf778.yishi.SelfTest.run(context) }
-                            .getOrElse { "自检失败：${it.message}" }
-                    }
-                }) { Text("运行自检（写入并读回验证）") }
-                selfTestResult?.let {
-                    Text(it, fontSize = 11.sp, color = Color(0xFF2E9184))
                 }
             }
         },
@@ -1748,9 +1861,8 @@ private fun sendTestNotification(context: android.content.Context) {
                 .bigText("还有 30 分钟截止 · 今天 16:00\n需提交实验报告，地点 A301（这是一条测试通知）"),
         )
         // 真实提醒里的三个按钮（完成/稍后/打开）需要真实的 eventId/reminderId 才能生效，
-        // 测试通知没有对应数据，所以这里只保留「打开」，
-        // 免得你点了「完成了」却发现什么都没发生。
-        .addAction(0, "打开", open)        .setVibrate(longArrayOf(0, 300, 200, 300))
+        // 不加操作按钮：和真实提醒保持一致（真实提醒只有点通知本体进 App）
+        .setVibrate(longArrayOf(0, 300, 200, 300))
         .build()
     manager.notify(9901, notification)
 }
@@ -1788,7 +1900,11 @@ private fun ReminderHealthCheck(context: android.content.Context) {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M || pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
+    // 全部正常时整块不渲染（像其它 App：没问题就不打扰）
+    if (notifyOk && batteryOk) return
+
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("提醒需要修复", fontWeight = FontWeight.Bold, fontSize = 15.sp)
         HealthRow(
             ok = notifyOk,
             label = "通知权限",
@@ -1826,9 +1942,6 @@ private fun ReminderHealthCheck(context: android.content.Context) {
                 }
             },
         )
-        if (notifyOk && batteryOk) {
-            Text("三项都正常，提醒会准时到达 ✅", color = Color(0xFF2E9184), fontSize = 12.sp)
-        }
     }
 }
 

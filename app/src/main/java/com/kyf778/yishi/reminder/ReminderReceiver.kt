@@ -69,21 +69,26 @@ class ReminderReceiver : BroadcastReceiver() {
         const val EXTRA_REMINDER_ID = "reminder_id"
         const val EXTRA_EVENT_ID = "event_id"
         const val EXTRA_NOTIFICATION_ID = "notification_id"
-        const val CHANNEL_REMINDER = "reminder"
-        const val CHANNEL_URGENT = "urgent"
+        // 渠道 ID 带 v2 后缀：Android 不允许改已有渠道的 importance，
+        // 想让「全部弹横幅」生效就必须用新 ID 重建渠道（旧的在系统里留着也不影响）。
+        const val CHANNEL_REMINDER = "reminder_v2"
+        const val CHANNEL_URGENT = "urgent_v2"
         const val SNOOZE_MINUTES = 10
 
         fun createChannels(context: Context) {
             val manager = context.getSystemService(NotificationManager::class.java)
+            // 两个渠道都用 IMPORTANCE_HIGH：只有 HIGH 及以上才会**弹横幅 + 响铃/震动**，
+            // DEFAULT(3) 只会安静躺在通知栏。用户要求所有提醒都要弹出来。
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_REMINDER, "事项提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                    description = "未来倒计时的提前提醒"
+                NotificationChannel(CHANNEL_REMINDER, "事项提醒", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "未来倒计时的提前提醒，会以横幅弹出"
+                    enableVibration(true)
                 },
             )
-            // 高优先级：会弹横幅、有提示音（就是普通通知的弹出，不是闹钟）
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_URGENT, "临近截止", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "30 分钟内截止的事项，会以横幅形式弹出提醒"
+                    description = "30 分钟内截止的事项，以横幅弹出提醒"
+                    enableVibration(true)
                 },
             )
         }

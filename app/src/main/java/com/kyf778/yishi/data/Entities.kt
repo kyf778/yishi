@@ -72,6 +72,16 @@ data class CountdownEventEntity(
     @ColumnInfo(name = "timezone_id") val timezoneId: String,
     @ColumnInfo(name = "event_type") val eventType: String = "OTHER",
     val priority: Int = 2,
+    /**
+     * 截止时间是否只精确到「日」。
+     *
+     * AI 或用户只给了「10月20日」这种日期时，deadlineAt 里存的 23:59 只是占位，
+     * 不是"真的那天 23:59 截止"。之前靠"是不是 23:59"去猜（isDayOnly），
+     * 既脆弱、又会让提醒在半夜弹。现在用这个字段显式记录。
+     *
+     * 纯日期事项的提醒规则：一律在【前一天 22:00】提醒，不做小时级倒数。
+     */
+    @ColumnInfo(name = "date_only") val dateOnly: Boolean = false,
     val status: String = "UPCOMING",
     @ColumnInfo(name = "completed_at") val completedAt: Long? = null,
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
@@ -175,6 +185,8 @@ data class CountdownCard(
     val status: String,
     /** 事项创建时间，用来算「已过 X/Y 天」。 */
     val createdAt: Long = 0L,
+    /** 是否只精确到日（不含钟点）。纯日期事项的提醒走「前一天 22:00」规则。 */
+    val dateOnly: Boolean = false,
 )
 
 data class StatusCount(val status: String, val count: Int)

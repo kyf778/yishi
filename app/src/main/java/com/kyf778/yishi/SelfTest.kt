@@ -22,10 +22,10 @@ object SelfTest {
 
         // 1) 建一条带标签 + 优先级 + AI 记录 + 自定义提醒的卡
         // 100 秒后到期：自适应提醒会排「提前 1 分钟」，约 40 秒后就能实测通知
-        val deadline = System.currentTimeMillis() + 100_000L
+        val deadline = System.currentTimeMillis() + 90_000L
         val eventId = repo.createImportedCountdown(
             title = "自检：数据库实验报告",
-            summary = "需交纸质版",
+            summary = "这条是验证通知文案用的：展开后应该只看到这句摘要，不该重复上面那行「还有N分钟截止」",
             deadlineAt = deadline,
             source = SourceDraft(
                 kind = "SELF-TEST",

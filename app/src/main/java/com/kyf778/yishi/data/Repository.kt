@@ -42,10 +42,6 @@ class MemoryRepository(private val db: AppDatabase) {
         eventIds.forEach { complete(it) }
     }
 
-    suspend fun archiveMany(eventIds: Collection<Long>) {
-        eventIds.forEach { archive(it) }
-    }
-
     suspend fun deleteMany(eventIds: Collection<Long>) {
         eventIds.forEach { delete(it) }
     }
@@ -71,6 +67,7 @@ class MemoryRepository(private val db: AppDatabase) {
         eventType: String = "OTHER",
         priority: Int = 2,
         remindersMinutes: List<Int> = listOf(1440, 60),
+        dateOnly: Boolean = false,
     ): Long {
         require(title.isNotBlank()) { "标题不能为空" }
         require(deadlineAt > System.currentTimeMillis()) { "截止时间必须晚于当前时间" }
@@ -97,10 +94,12 @@ class MemoryRepository(private val db: AppDatabase) {
                     timezoneId = ZoneId.systemDefault().id,
                     eventType = eventType,
                     priority = priority,
+                    dateOnly = dateOnly,
                 ),
             )
-            adaptiveReminders(deadlineAt, now, remindersMinutes).distinct().forEach { offset ->
-                val trigger = deadlineAt - offset * 60_000L
+            adaptiveReminders(deadlineAt, now, remindersMinutes, dateOnly).distinct().forEach { offset ->
+                // 深夜保护：算出来落在 23:00~07:00 的提醒，挪到当天/前一天 21:00
+                val trigger = quietHoursAdjust(deadlineAt - offset * 60_000L, now)
                 if (trigger > now) {
                     dao.insertReminder(
                         ReminderRuleEntity(
@@ -117,21 +116,83 @@ class MemoryRepository(private val db: AppDatabase) {
     }
 
     /**
-     * 根据截止时间远近挑选合理的提醒提前量。
+     * 深夜保护：把落在 23:00~07:00 的提醒挪到合理的时段。
      *
-     * 默认的「提前 1 天 / 1 小时」对 10 分钟后的事完全没用——两个 trigger 都已经是过去时间，
-     * 会被下面的 `trigger > now` 过滤掉，结果一个提醒都排不上。
-     * 所以按剩余时长自适应：剩得越少，提醒越贴近截止点。
+     * 为什么需要：有钟点的事项按「提前 N 小时」倒推时，如果 deadline 本身就在深夜
+     * （比如 00:30 交材料），提前 1 天就会推到前一天 00:30 —— 半夜弹通知。
+     *
+     * 规则：凌晨（00:00~06:59）→ 挪到【前一天 21:00】；23:00 之后 → 挪到【当天 21:00】。
+     * 07:00~22:59 属于正常时段，原样返回。
+     *
+     * ⚠️ 关键保护：挪完如果落在 now 之前（已经是过去时间），说明这个挪动会让提醒失效。
+     * 这时**不挪**，原样返回 —— 让调用方的 `trigger > now` 去判断是否还有效。
+     * 否则"10 分钟后洗衣服"会被推到昨天 21:00，提醒直接消失。
      */
-    private fun adaptiveReminders(deadlineAt: Long, now: Long, requested: List<Int>): List<Int> {
+    private fun quietHoursAdjust(
+        triggerAt: Long,
+        now: Long = System.currentTimeMillis(),
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): Long {
+        val t = java.time.Instant.ofEpochMilli(triggerAt).atZone(zone)
+        if (t.hour in 7..22) return triggerAt // 正常时段不动
+
+        val sameDay21 = t.toLocalDate().atTime(21, 0).atZone(zone).toInstant().toEpochMilli()
+        val adjusted = if (sameDay21 < triggerAt) {
+            sameDay21 // 23:00 的 → 当天 21:00
+        } else {
+            // 凌晨 → 前一天 21:00
+            t.toLocalDate().minusDays(1).atTime(21, 0).atZone(zone).toInstant().toEpochMilli()
+        }
+        // 挪完变成过去时间 → 不挪，保持原样（宁可在深夜响，也别让提醒彻底消失）
+        return if (adjusted > now) adjusted else triggerAt
+    }
+
+    /**
+     * 算出该排几个提醒、各提前多少分钟。
+     *
+     * **纯日期事项走另一套规则**（dateOnly=true）：
+     *   只在【前一天 21:00】提醒一次，不做小时级倒数。
+     *   因为「10月20日交报告」的意思是"那天做完"，不是"那天 23:59:00 截止"，
+     *   按小时倒数会推到半夜弹通知，扰人又没意义。
+     *
+     * 有时刻的事项：优先用 AI/用户给的提前量；给的不合适（都超过剩余时间）就按剩余时长自适应。
+     */
+    private fun adaptiveReminders(
+        deadlineAt: Long,
+        now: Long,
+        requested: List<Int>,
+        dateOnly: Boolean = false,
+    ): List<Int> {
+        val zone = ZoneId.systemDefault()
+        if (dateOnly) {
+            // 目标：截止日【前一天 21:00】提醒一次
+            val deadlineDate = java.time.Instant.ofEpochMilli(deadlineAt).atZone(zone).toLocalDate()
+            val remindAt = deadlineDate.minusDays(1).atTime(21, 0).atZone(zone).toInstant().toEpochMilli()
+            if (remindAt > now) {
+                // 返回"提前多少分钟"，由调用方统一换算成 triggerAt
+                val offset = ((deadlineAt - remindAt) / 60_000L).toInt()
+                if (offset > 0) return listOf(offset)
+            }
+            // 已经过了"前一天 21:00"（比如今天建的、明天就截止）→ 退化成到点提醒
+            // 但如果连到点都还没到，就提醒在「今天 21:00」或直接到点
+            val today21 = java.time.LocalDate.now(zone).atTime(21, 0).atZone(zone).toInstant().toEpochMilli()
+            if (today21 > now && today21 < deadlineAt) {
+                return listOf(((deadlineAt - today21) / 60_000L).toInt())
+            }
+            return listOf(0)
+        }
+
         val remainMinutes = (deadlineAt - now) / 60_000L
         val usable = requested.filter { it > 0 && it < remainMinutes }
         if (usable.isNotEmpty()) return usable
-        // 用户/AI 给的提前量都太长了，按剩余时间挑几个能落地的
+        // 用户/AI 给的提前量都太长了，按剩余时间挑。
+        //
+        // ⚠️ 短任务只提醒**一次**：剩余不到 2 小时的，多提醒一遍只是打扰
+        // （"还有 30 分钟"和"还有 5 分钟"对一件马上去做的事没区别）。
         return when {
             remainMinutes <= 5 -> listOf(1)
-            remainMinutes <= 30 -> listOf(5, 1)
-            remainMinutes <= 120 -> listOf(30, 5)
+            remainMinutes <= 30 -> listOf(1)
+            remainMinutes <= 120 -> listOf(5)
             remainMinutes <= 24 * 60 -> listOf(60, 10)
             else -> listOf(1440, 60)
         }.filter { it < remainMinutes }.ifEmpty { listOf(0) }
@@ -147,6 +208,7 @@ class MemoryRepository(private val db: AppDatabase) {
         priority: Int = 2,
         remindersMinutes: List<Int> = listOf(1440, 60),
         tagNames: List<String> = emptyList(),
+        dateOnly: Boolean = false,
     ): Long {
         require(title.isNotBlank()) { "标题不能为空" }
         require(deadlineAt > System.currentTimeMillis()) { "截止时间必须晚于当前时间" }
@@ -205,11 +267,13 @@ class MemoryRepository(private val db: AppDatabase) {
                     timezoneId = ZoneId.systemDefault().id,
                     eventType = eventType,
                     priority = priority,
+                    dateOnly = dateOnly,
                     createdAt = now,
                 ),
             )
-            adaptiveReminders(deadlineAt, now, remindersMinutes).distinct().forEach { offset ->
-                val trigger = deadlineAt - offset * 60_000L
+            adaptiveReminders(deadlineAt, now, remindersMinutes, dateOnly).distinct().forEach { offset ->
+                // 深夜保护：算出来落在 23:00~07:00 的提醒，挪到当天/前一天 21:00
+                val trigger = quietHoursAdjust(deadlineAt - offset * 60_000L, now)
                 if (trigger > now) {
                     dao.insertReminder(
                         ReminderRuleEntity(
@@ -287,7 +351,7 @@ class MemoryRepository(private val db: AppDatabase) {
     }
 
     /** 归档/删除（用户口中的"归档"）。 */
-    suspend fun archive(eventId: Long) {
+    suspend fun delete(eventId: Long) {
         db.withTransaction {
             val event = dao.getEvent(eventId) ?: return@withTransaction
             dao.deleteRemindersForEvent(eventId)
@@ -298,13 +362,41 @@ class MemoryRepository(private val db: AppDatabase) {
         }
     }
 
-    suspend fun delete(eventId: Long) {
+    /**
+     * 恢复一个已完成/已删除的事项：把状态改回 UPCOMING，并按当前时间重排提醒。
+     *
+     * 用于「历史区里点错了 / 想重新做」。时间已经过了的话仍可恢复（会显示为逾期），
+     * 但不会再排提醒（过去的提醒没意义）。
+     */
+    suspend fun restore(eventId: Long) {
         db.withTransaction {
             val event = dao.getEvent(eventId) ?: return@withTransaction
-            dao.deleteRemindersForEvent(eventId)
-            dao.updateEvent(event.copy(status = "CANCELLED", updatedAt = System.currentTimeMillis()))
-            if (dao.countActiveEvents(event.memoryId, eventId) == 0) {
-                dao.updateMemory(dao.getMemory(event.memoryId)?.copy(status = "ARCHIVED") ?: return@withTransaction)
+            val now = System.currentTimeMillis()
+            // 事件状态回到 UPCOMING（或超时则 OVERDUE）
+            val newStatus = if (event.deadlineAt > now) "UPCOMING" else "OVERDUE"
+            dao.updateEvent(
+                event.copy(status = newStatus, completedAt = null, updatedAt = now),
+            )
+            // 记忆状态也回到 ACTIVE，否则列表查不出来
+            dao.getMemory(event.memoryId)?.let { mem ->
+                dao.updateMemory(mem.copy(status = "ACTIVE", updatedAt = now))
+            }
+            // 只有在截止时间还没到时才重排提醒
+            if (event.deadlineAt > now) {
+                dao.deleteRemindersForEvent(eventId)
+                adaptiveReminders(event.deadlineAt, now, listOf(1440, 60), event.dateOnly).distinct().forEach { offset ->
+                    val trigger = quietHoursAdjust(event.deadlineAt - offset * 60_000L, now)
+                    if (trigger > now) {
+                        dao.insertReminder(
+                            ReminderRuleEntity(
+                                eventId = eventId,
+                                offsetMinutes = offset,
+                                triggerAt = trigger,
+                                notificationId = stableNotificationId(eventId, offset),
+                            ),
+                        )
+                    }
+                }
             }
         }
     }
