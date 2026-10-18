@@ -39,8 +39,8 @@
 **位置**：`app/src/main/java/com/kyf778/yishi/settings/AppSettings.kt` 第 58-59 行
 
 ```kotlin
-const val CODEBUDDY_ACCESS_TOKEN = "<JWT_TOKEN>"  // JWT
-const val CODEBUDDY_REFRESH_TOKEN = "<JWT_TOKEN>" // JWT
+const val CODEBUDDY_ACCESS_TOKEN = "<YOUR_JWT_TOKEN>"  // JWT
+const val CODEBUDDY_REFRESH_TOKEN = "<YOUR_JWT_TOKEN>" // JWT
 ```
 
 **关键事实**：这两个 token 在**已推送的提交 `f7c2a6d`（v0.11.0）里**。

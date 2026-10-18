@@ -161,8 +161,8 @@ kyf778
 
 **当前代码**（`AppSettings.kt` L58-59）：
 ```kotlin
-const val CODEBUDDY_ACCESS_TOKEN = "<JWT_TOKEN>"
-const val CODEBUDDY_REFRESH_TOKEN = "<JWT_TOKEN>"
+const val CODEBUDDY_ACCESS_TOKEN = "<YOUR_JWT_TOKEN>"
+const val CODEBUDDY_REFRESH_TOKEN = "<YOUR_JWT_TOKEN>"
 ```
 
 **改为**：
@@ -192,8 +192,8 @@ android {
 
 **local.properties**（不提交）：
 ```properties
-codebuddy.token=<JWT_TOKEN>
-codebuddy.refresh=<JWT_TOKEN>
+codebuddy.token=<YOUR_JWT_TOKEN>
+codebuddy.refresh=<YOUR_JWT_TOKEN>
 ```
 
 ### 2. 完善 .gitignore
