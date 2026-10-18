@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -22,6 +24,23 @@ android {
         targetSdk = 35
         versionCode = 13
         versionName = "0.12.0"
+
+        // ── 敏感凭据从 local.properties 读取，绝不写进源码 ──────────────
+        // local.properties 在 .gitignore 里，不会被提交。
+        // 没配的话是空串，App 会走设置页里用户自己填的 Key。
+        val localProps = Properties()
+        val localPropsFile = rootProject.file("local.properties")
+        if (localPropsFile.exists()) {
+            localPropsFile.inputStream().use { localProps.load(it) }
+        }
+        buildConfigField(
+            "String", "CODEBUDDY_ACCESS_TOKEN",
+            "\"${localProps.getProperty("codebuddy.token") ?: ""}\"",
+        )
+        buildConfigField(
+            "String", "CODEBUDDY_REFRESH_TOKEN",
+            "\"${localProps.getProperty("codebuddy.refresh") ?: ""}\"",
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

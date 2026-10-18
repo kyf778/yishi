@@ -1,5 +1,7 @@
 package com.kyf778.yishi.settings
 
+import com.kyf778.yishi.BuildConfig
+
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -52,11 +54,15 @@ object AiDefaults {
     // 为什么不走 NAS：经 Tailscale Funnel 时 TLS 握手 3.3-7.5s、首字节 7-17s
     // （家庭出口被中继到美国旧金山），同一张图 88 秒；直连 3.7-4.1 秒。
     //
-    // ⚠️ 这两个 token 在 APK 里可被反编译提取，泄露后别人能消耗这个账号的
-    //    CodeBuddy 积分（看不到聊天记录、改不了账号）。access_token 一年过期，
-    //    refresh_token 可续期。若担心，可在设置页填自己的 Key 覆盖。
-    const val CODEBUDDY_ACCESS_TOKEN = "<JWT_TOKEN>"
-    const val CODEBUDDY_REFRESH_TOKEN = "<JWT_TOKEN>"
+    // ⚠️ 安全提示：这些值**不再硬编码在源码里**。
+    //    之前直接写在代码里并提交到了 git，属于凭据泄露（GitHub Secret Scanning
+    //    会标记这类仓库）。现在改为从 local.properties 读取，该文件在 .gitignore 里。
+    //
+    //    构建时由 app/build.gradle.kts 注入到 BuildConfig；
+    //    如果 local.properties 里没配，这些值是空串，App 会走设置页里用户自己填的 Key。
+    val CODEBUDDY_ACCESS_TOKEN: String = BuildConfig.CODEBUDDY_ACCESS_TOKEN
+    val CODEBUDDY_REFRESH_TOKEN: String = BuildConfig.CODEBUDDY_REFRESH_TOKEN
+
 }
 
 class AppSettings(private val context: Context) {
