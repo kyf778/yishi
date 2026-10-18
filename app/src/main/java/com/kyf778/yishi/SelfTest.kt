@@ -5,76 +5,82 @@ import com.kyf778.yishi.data.AiRecordDraft
 import com.kyf778.yishi.data.AppDatabase
 import com.kyf778.yishi.data.MemoryRepository
 import com.kyf778.yishi.data.SourceDraft
-import com.kyf778.yishi.data.MemoryTagCrossRef
-import com.kyf778.yishi.data.TagEntity
 
 /**
- * 开发期自检：验证「标签 / 优先级 / AI 记录 / 提醒建议 / 批量操作」五条写入路径。
- * 只在 debug 构建里由主界面调用一次，用于人工确认落库结果。
+ * 开发期自检：建卡并跑通「落库 → 排提醒 → 发通知」全链路。
  *
- * 用法：见 MainActivity 里的 DEBUG_SELF_TEST 开关。
+ * 建**两条**卡，专门验证通知副标题的钟点处理：
+ *   ① 有时刻（dateOnly=false）→ 副标题应带钟点，如「今天 17:05」
+ *   ② 纯日期（dateOnly=true）→ 副标题**只能有日期**，不能出现 23:59
+ *
+ * 两条都在 2~3 分钟内触发，装机后约 3 分钟就能对比。
  */
 object SelfTest {
     suspend fun run(context: Context): String {
         val repo = MemoryRepository(AppDatabase.get(context))
-        val dao = AppDatabase.get(context).memoryDao()
+        val scheduler = com.kyf778.yishi.reminder.ReminderScheduler(context, repo)
         val out = StringBuilder()
+        val now = System.currentTimeMillis()
 
-        // 1) 建一条带标签 + 优先级 + AI 记录 + 自定义提醒的卡
-        // 100 秒后到期：自适应提醒会排「提前 1 分钟」，约 40 秒后就能实测通知
-        val deadline = System.currentTimeMillis() + 90_000L
-        val eventId = repo.createImportedCountdown(
-            title = "自检：数据库实验报告",
-            summary = "这条是验证通知文案用的：展开后应该只看到这句摘要，不该重复上面那行「还有N分钟截止」",
-            deadlineAt = deadline,
+        // ① 有时刻
+        val dlA = now + 120_000L
+        val idA = repo.createImportedCountdown(
+            title = "测A 有时刻事项",
+            summary = "这条应该有钟点。展开不该重复副标题。",
+            deadlineAt = dlA,
             source = SourceDraft(
                 kind = "SELF-TEST",
                 sourceUri = null,
                 copiedFilePath = null,
                 mimeType = "text/plain",
                 byteSize = 0L,
-                rawText = "自检",
+                rawText = "自检A",
                 ocrText = null,
-                contentHash = "selftest-" + deadline,
+                contentHash = "selftest-a-$now",
             ),
             aiRecord = AiRecordDraft(
-                provider = "selftest",
-                model = "none",
-                promptVersion = "v0.11-selftest",
-                resultJson = "{\"title\":\"自检\"}",
-                confidence = 0.99,
-                status = "SUCCESS",
+                provider = "selftest", model = "none", promptVersion = "v0.12-selftest",
+                resultJson = "{\"case\":\"withTime\"}", confidence = 0.99, status = "SUCCESS",
             ),
             eventType = "SUBMISSION",
-            priority = 1,
-            remindersMinutes = listOf(120, 30),
-            tagNames = listOf("作业", "实验", "报告"),
+            remindersMinutes = listOf(1),
+            dateOnly = false,
         )
-        out.append("建卡 eventId=$eventId\n")
+        repo.futureReminders().filter { it.eventId == idA }.forEach(scheduler::schedule)
+        out.append("A 有时刻 eventId=$idA\n")
 
-        // 排提醒（真实路径是 saveOne 调 scheduler；自检里也要排，否则通知不会发）
-        val scheduler = com.kyf778.yishi.reminder.ReminderScheduler(context, repo)
-        repo.futureReminders().filter { it.eventId == eventId }.forEach(scheduler::schedule)
-        out.append("已排提醒: ")
-        out.append(repo.reminderPlanFor(eventId).map { it.offsetMinutes }.toString())
-        out.append("\n")
+        // ② 纯日期
+        val dlB = now + 180_000L
+        val idB = repo.createImportedCountdown(
+            title = "测B 纯日期事项",
+            summary = "这条不该有钟点，副标题只能出现日期。",
+            deadlineAt = dlB,
+            source = SourceDraft(
+                kind = "SELF-TEST",
+                sourceUri = null,
+                copiedFilePath = null,
+                mimeType = "text/plain",
+                byteSize = 0L,
+                rawText = "自检B",
+                ocrText = null,
+                contentHash = "selftest-b-$now",
+            ),
+            aiRecord = AiRecordDraft(
+                provider = "selftest", model = "none", promptVersion = "v0.12-selftest",
+                resultJson = "{\"case\":\"dateOnly\"}", confidence = 0.99, status = "SUCCESS",
+            ),
+            eventType = "OTHER",
+            remindersMinutes = listOf(1),
+            dateOnly = true,
+        )
+        repo.futureReminders().filter { it.eventId == idB }.forEach(scheduler::schedule)
+        out.append("B 纯日期 eventId=$idB\n")
 
-        // 2) 读回验证
-        val card = dao.getCountdown(eventId)
-        out.append("  优先级=").append(card?.priority).append("（期望 1）\n")
-        out.append("  类型=").append(card?.eventType).append("（期望 SUBMISSION）\n")
-
-        val tags = repo.tagNamesFor(card?.memoryId ?: 0)
-        out.append("  标签=").append(tags).append("（期望 作业/实验/报告）\n")
-
-        val plan = repo.reminderPlanFor(eventId)
-        out.append("  提醒=").append(plan.map { it.offsetMinutes }).append("（期望 [120,30]）\n")
-
-        val ai = repo.latestAiRecordFor(card?.memoryId ?: 0)
-        out.append("  AI记录=").append(ai?.model).append(" 提示词=").append(ai?.promptVersion).append("\n")
-
-        // 保留卡片：让用户亲眼看到通知弹出
-        out.append("卡片已保留，约 40 秒后应弹出通知\n")
+        out.append("\nA 提醒=").append(repo.reminderPlanFor(idA).map { it.offsetMinutes })
+        out.append("\nB 提醒=").append(repo.reminderPlanFor(idB).map { it.offsetMinutes })
+        out.append("\n\n约 2~3 分钟后对比两条通知：")
+        out.append("\n  A 副标题应是「今天 HH:mm」（带钟点）")
+        out.append("\n  B 副标题应是「M月d日」（只有日期）")
 
         return out.toString()
     }

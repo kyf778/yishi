@@ -405,6 +405,39 @@ class MemoryRepository(private val db: AppDatabase) {
 
     suspend fun reminder(reminderId: Long): ReminderRuleEntity? = dao.getReminder(reminderId)
 
+    /**
+     * 给「还没有任何提醒规则」的进行中事项补排提醒。
+     *
+     * 为什么需要：之前 only 在建卡/改卡时才会写 reminder_rule。
+     * 一旦规则被删掉（比如迁移时清了旧规则、或用户手动删过），
+     * 这条事项就再也不会有提醒了 —— App 启动时的 rescheduleAll()
+     * 只是把「已有的规则」重新排进 WorkManager，不会凭空造规则。
+     *
+     * 这个函数在启动时跑一次，作为兜底：缺什么补什么。
+     * 已完成的/已取消的/已逾期的不补。
+     */
+    suspend fun repairMissingReminders(now: Long = System.currentTimeMillis()) {
+        db.withTransaction {
+            val active = dao.getUpcomingEventsWithoutReminders(now)
+            active.forEach { event ->
+                val offsets = adaptiveReminders(event.deadlineAt, now, listOf(1440, 60), event.dateOnly)
+                offsets.distinct().forEach { offset ->
+                    val trigger = quietHoursAdjust(event.deadlineAt - offset * 60_000L, now)
+                    if (trigger > now) {
+                        dao.insertReminder(
+                            ReminderRuleEntity(
+                                eventId = event.id,
+                                offsetMinutes = offset,
+                                triggerAt = trigger,
+                                notificationId = stableNotificationId(event.id, offset),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun stableNotificationId(eventId: Long, offsetMinutes: Int): Int =
         UUID.nameUUIDFromBytes("yishi:$eventId:$offsetMinutes".toByteArray()).hashCode() and Int.MAX_VALUE
 }

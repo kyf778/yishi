@@ -82,6 +82,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -140,6 +141,18 @@ class MainActivity : ComponentActivity() {
         setContent { YishiApp() }
     }
 
+    /**
+     * App 已经在前台/后台时点了通知 —— 此时不会走 onCreate，只会走这里。
+     *
+     * Activity 默认 launchMode 是 standard，正常情况下点通知会新建实例；
+     * 但如果系统复用了已有任务栈（或被 Launcher 拉回），就必须在这里把
+     * 新 Intent 换进来，否则 Compose 里读到的还是旧 Intent，跳不到详情。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
     companion object {
         const val EXTRA_EVENT_ID = "event_id"
     }
@@ -153,13 +166,17 @@ private fun YishiApp() {
     val database = remember { AppDatabase.get(context) }
     val repository = remember { MemoryRepository(database) }
     val scheduler = remember { ReminderScheduler(context, repository) }
-    var showAdd by remember { mutableStateOf(false) }
-    var showImport by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<CountdownCard?>(null) }
+    var showAdd by rememberSaveable { mutableStateOf(false) }
+    var showImport by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    // 详情页：存 eventId 而不是对象，这样旋转屏幕后能恢复
+    // （CountdownCard 是普通 data class，不能直接 rememberSaveable）
+    var selectedId by rememberSaveable { mutableStateOf<Long?>(null) }
     var editing by remember { mutableStateOf<CountdownCard?>(null) }
-    var tab by remember { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(0) }
     val cards by repository.observeCountdowns().collectAsStateWithLifecycle(emptyList())
+    // 由 selectedId 反查卡片；cards 变化时自动跟随
+    val selected: CountdownCard? = selectedId?.let { id -> cards.firstOrNull { it.eventId == id } }
     val pastCards by repository.observePastEvents().collectAsStateWithLifecycle(emptyList())
     val statuses by repository.observeStatusCounts().collectAsStateWithLifecycle(emptyList())
     val types by repository.observeTypeCounts().collectAsStateWithLifecycle(emptyList())
@@ -184,7 +201,37 @@ private fun YishiApp() {
             ReminderReceiver.createChannels(context)
         }
     }
-    LaunchedEffect(Unit) { scheduler.rescheduleAll() }
+    LaunchedEffect(Unit) {
+        // 先补「缺了提醒规则」的事项（迁移清过旧规则、或历史数据不全时靠这个兜底），
+        // 再把所有未来提醒重新排进 WorkManager。
+        // 顺序不能反：rescheduleAll 只处理已存在的规则，不会凭空创建。
+        runCatching { repository.repairMissingReminders() }
+        scheduler.rescheduleAll()
+    }
+
+    // 从通知点进来时，直接打开对应事项的详情页。
+    //
+    // 之前 ReminderWorker 把 eventId 塞进了 Intent（EXTRA_EVENT_ID），
+    // 但这里从来没人读 —— 点通知只会停在首页，用户还得自己翻列表找。
+    //
+    // 注意用 Activity 的 intent 而不是 CompositionLocal：外部启动时
+    // LocalContext 拿到的可能不是 Activity 实例。
+    val activity = context as? android.app.Activity
+    LaunchedEffect(cards) {
+        val intent = activity?.intent ?: return@LaunchedEffect
+        val eventId = intent.getLongExtra(MainActivity.EXTRA_EVENT_ID, -1L)
+        if (eventId < 0L) return@LaunchedEffect
+        // 等数据加载出来再找；找到就打开详情，然后清掉这个 extra，
+        // 否则旋转屏幕/再次回到前台又会重新弹一次详情。
+        val target = cards.firstOrNull { it.eventId == eventId }
+        if (target != null) {
+            selectedId = target.eventId
+            intent.removeExtra(MainActivity.EXTRA_EVENT_ID)
+        } else if (cards.isNotEmpty()) {
+            // 数据已经加载完但没这条（可能已被删除），别一直等着
+            intent.removeExtra(MainActivity.EXTRA_EVENT_ID)
+        }
+    }
 
     MaterialTheme {
         Surface(color = Color(0xFFF6F7FB), modifier = Modifier.fillMaxSize()) {
@@ -239,7 +286,7 @@ private fun YishiApp() {
                         onClearSelection = { batchSelected = emptySet() },
                         onBatchDone = { batchCompletePending = true },
                         onBatchDelete = { batchDeletePending = true },
-                        onSelect = { selected = it },
+                        onSelect = { selectedId = it.eventId },
                         onImport = { showImport = true },
                     )
                     1 -> StatisticsPage(
@@ -273,9 +320,9 @@ private fun YishiApp() {
     selected?.let { card ->
         DetailDialog(
             card = card,
-            onDismiss = { selected = null },
+            onDismiss = { selectedId = null },
             onComplete = { completeTarget = card },
-            onEdit = { editing = card; selected = null },
+            onEdit = { editing = card; selectedId = null },
             onDelete = {
                 deleteTarget = card
             },
@@ -305,7 +352,7 @@ private fun YishiApp() {
             confirmText = "删除",
             danger = true,
             onConfirm = {
-                scope.launch { repository.delete(card.eventId); selected = null }
+                scope.launch { repository.delete(card.eventId); selectedId = null }
                 deleteTarget = null
             },
             onDismiss = { deleteTarget = null },
@@ -320,7 +367,7 @@ private fun YishiApp() {
             confirmText = "已完成",
             danger = false,
             onConfirm = {
-                scope.launch { repository.complete(card.eventId); selected = null }
+                scope.launch { repository.complete(card.eventId); selectedId = null }
                 completeTarget = null
             },
             onDismiss = { completeTarget = null },
@@ -394,6 +441,8 @@ private fun CountdownHome(
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     val context = LocalContext.current
+    // 分钟级时钟：同一分钟内不重组，避免每秒刷整页（性能关键）
+    val nowMinute = rememberMinuteTick() * 60_000L
 
     // 只按搜索词过滤（标题+备注），固定按截止时间排序
     val visible = remember(cards, query) {
@@ -533,7 +582,7 @@ private fun CountdownHome(
                                     .border(2.5.dp, Color(0xFF4F6BFF), RoundedCornerShape(20.dp)),
                             )
                         }
-                        CountdownCardView(card)
+                        CountdownCardView(card, nowMinute)
                     }
                 }
             }
@@ -656,9 +705,49 @@ private fun formatDeadlineFriendly(value: Long): String {
     }
 }
 
+/**
+ * 每秒触发一次的重组时钟。
+ *
+ * 为什么需要：倒计时卡片里的 `System.currentTimeMillis()` 只在**重组时**读一次，
+ * 没有东西驱动重组的话，界面上的"还剩 N 天/小时/分钟"就会一直停在初始化那一刻，
+ * 看起来就像卡住了。
+ *
+ * 用 produceState + delay 做节拍器。返回的值本身不重要，重要的是它每次变化
+ * 都会让读它的 Composable 重组一次，从而重新读取当前时间。
+ *
+ * 只精确到秒（1000ms），不用 16ms —— 倒计时按秒/分变化，没必要按帧刷新。
+ */
 @Composable
-private fun CountdownCardView(card: CountdownCard) {
-    val now = System.currentTimeMillis()
+private fun rememberSecondTick(): Long {
+    val tick by produceState(System.currentTimeMillis()) {
+        while (true) {
+            value = System.currentTimeMillis()
+            delay(1000L - (System.currentTimeMillis() % 1000L))
+        }
+    }
+    return tick
+}
+
+/**
+ * 分钟级的时钟。
+ *
+ * 倒计时卡片显示的粒度最细到"分钟"，所以**不需要每秒重组**。
+ * 用 derivedStateOf 把秒级 tick 压成分钟级：同一分钟内 value 不变，
+ * 读它的 Composable 就不会重组，省掉 59/60 的无用渲染。
+ *
+ * 这一条是性能关键：之前每秒全页重组导致 Janky 50%。
+ */
+@Composable
+private fun rememberMinuteTick(): Long {
+    val secTick = rememberSecondTick()
+    val minuteTick by remember {
+        derivedStateOf { secTick / 60_000L }
+    }
+    return minuteTick
+}
+
+@Composable
+private fun CountdownCardView(card: CountdownCard, now: Long) {
     val remaining = card.deadlineAt - now
     val overdue = remaining < 0L || card.status == "OVERDUE"
     val totalMs = card.deadlineAt - card.createdAt
@@ -1378,7 +1467,9 @@ private fun DetailDialog(
                             modifier = Modifier.padding(top = 2.dp),
                         )
                     }
-                    val remain = formatRemaining(card.deadlineAt - System.currentTimeMillis())
+                    // 详情页也跟时间走（否则打开着不动，倒计时就一直是旧值）
+    val detailTick = rememberSecondTick()
+    val remain = formatRemaining(card.deadlineAt - detailTick)
                     Column(horizontalAlignment = Alignment.End) {
                         Text("还有", color = Color.White.copy(alpha = 0.72f), fontSize = 12.sp)
                         Row(verticalAlignment = Alignment.Bottom) {

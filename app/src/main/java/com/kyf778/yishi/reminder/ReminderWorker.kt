@@ -68,7 +68,7 @@ class ReminderWorker(
                 reminder.offsetMinutes % 60 == 0 -> "还有 ${reminder.offsetMinutes / 60} 小时截止"
                 else -> "距离截止还有 ${reminder.offsetMinutes} 分钟"
             }
-            val dueText = formatDue(card.deadlineAt)
+            val dueText = formatDue(card.deadlineAt, card.dateOnly)
             val summary = card.summary.trim()
 
             // 所有提醒都弹横幅（用户要求）：统一走一个 HIGH 渠道，
@@ -131,10 +131,23 @@ class ReminderWorker(
         android.os.Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
 
-    private fun formatDue(deadlineAt: Long): String {
+    /**
+     * 通知副标题里的「截止时间」。
+     *
+     * dateOnly=true（纯日期事项）时只显示日期，绝不显示钟点——
+     * 数据库里的 23:59 只是占位，露出来会让用户真以为那天 23:59 截止，
+     * 而且和主界面显示的「10月20日」对不上。
+     */
+    private fun formatDue(deadlineAt: Long, dateOnly: Boolean): String {
         val zone = java.time.ZoneId.systemDefault()
         val due = java.time.Instant.ofEpochMilli(deadlineAt).atZone(zone)
         val days = java.time.temporal.ChronoUnit.DAYS.between(java.time.LocalDate.now(zone), due.toLocalDate())
+
+        // 纯日期：一律给绝对日期，不用「今天/明天」这类相对说法，也不带钟点
+        if (dateOnly) {
+            return if (days < 0) "已逾期" else "${due.monthValue}月${due.dayOfMonth}日"
+        }
+
         val hm = String.format("%02d:%02d", due.hour, due.minute)
         return when {
             days == 0L -> "今天 $hm"

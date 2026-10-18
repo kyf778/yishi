@@ -65,6 +65,23 @@ interface MemoryDao {
     @Query("SELECT * FROM reminder_rule WHERE id = :reminderId LIMIT 1")
     suspend fun getReminder(reminderId: Long): ReminderRuleEntity?
 
+    /**
+     * 找出「还在进行中、截止时间没过、但一条有效提醒规则都没有」的事项。
+     *
+     * 用于启动时兜底修复：迁移清掉旧规则、或历史数据缺规则时，靠这个补回来。
+     */
+    @Query(
+        """
+        SELECT e.* FROM countdown_event e
+        WHERE e.status IN ('UPCOMING', 'OVERDUE')
+          AND e.deadline_at > :now
+          AND NOT EXISTS (
+              SELECT 1 FROM reminder_rule r WHERE r.event_id = e.id AND r.enabled = 1
+          )
+        """,
+    )
+    suspend fun getUpcomingEventsWithoutReminders(now: Long): List<CountdownEventEntity>
+
     @Insert
     suspend fun insertMemory(memory: MemoryItemEntity): Long
 
