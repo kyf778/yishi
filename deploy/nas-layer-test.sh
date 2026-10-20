@@ -14,7 +14,7 @@ const BODY = JSON.stringify({
   messages:[{role:'system',content:PROMPT},{role:'user',content}],
   max_tokens:1200, temperature:0.1, stream:false, reasoning:{enabled:false},
 })
-const TOKEN = '<NAS_GATEWAY_KEY>'
+const TOKEN="${NAS_GATEWAY_KEY:?please export NAS_GATEWAY_KEY}"
 
 async function one(url, label, auth) {
   const t0 = Date.now()

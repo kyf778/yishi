@@ -2,7 +2,7 @@
 # 端到端验证：公网入口 -> yishi-gateway -> free-llm-bridge -> codebuddy-bridge -> CodeBuddy
 
 set -e
-TOKEN=<NAS_GATEWAY_KEY>
+TOKEN="${NAS_GATEWAY_KEY:?please export NAS_GATEWAY_KEY}"
 
 echo "=== 1. free-llm-bridge 里的模型清单（看 codebuddy 是否在列）==="
 docker exec free-llm-bridge node -e "

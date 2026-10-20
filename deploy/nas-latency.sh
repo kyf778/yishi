@@ -1,7 +1,7 @@
 #!/bin/sh
 # 逐跳测耗时，定位慢在哪一段
 
-TOKEN=<NAS_GATEWAY_KEY>
+TOKEN="${NAS_GATEWAY_KEY:?please export NAS_GATEWAY_KEY}"
 
 echo "========================================"
 echo "第1跳：NAS 本机 -> codebuddy-bridge (19001)"

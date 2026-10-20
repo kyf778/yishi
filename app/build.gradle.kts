@@ -18,6 +18,16 @@ android {
     namespace = "com.kyf778.yishi"
     compileSdk = 35
 
+    // ── 敏感凭据从 local.properties 读取，绝不写进源码 ──────────────
+    // AGENTS.md 铁律三：任何密钥都不准写进源码，推送前必须扫一遍。
+    // local.properties 在 .gitignore 里（已用 git check-ignore 确认），不会被提交。
+    // 没配的话是空串，App 会走设置页里用户自己填的 Key。
+    val localProps = Properties()
+    val localPropsFile = rootProject.file("local.properties")
+    if (localPropsFile.exists()) {
+        localPropsFile.inputStream().use { localProps.load(it) }
+    }
+
     defaultConfig {
         applicationId = "com.kyf778.yishi"
         minSdk = 26
@@ -25,14 +35,6 @@ android {
         versionCode = 13
         versionName = "0.12.0"
 
-        // ── 敏感凭据从 local.properties 读取，绝不写进源码 ──────────────
-        // local.properties 在 .gitignore 里，不会被提交。
-        // 没配的话是空串，App 会走设置页里用户自己填的 Key。
-        val localProps = Properties()
-        val localPropsFile = rootProject.file("local.properties")
-        if (localPropsFile.exists()) {
-            localPropsFile.inputStream().use { localProps.load(it) }
-        }
         buildConfigField(
             "String", "CODEBUDDY_ACCESS_TOKEN",
             "\"${localProps.getProperty("codebuddy.token") ?: ""}\"",
@@ -40,6 +42,10 @@ android {
         buildConfigField(
             "String", "CODEBUDDY_REFRESH_TOKEN",
             "\"${localProps.getProperty("codebuddy.refresh") ?: ""}\"",
+        )
+        buildConfigField(
+            "String", "NAS_GATEWAY_KEY",
+            "\"" + (localProps.getProperty("nas.gatewayKey") ?: "") + "\""
         )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -52,9 +58,9 @@ android {
         // 每次都要求先卸载（会丢失已录入的数据）。
         create("shared") {
             storeFile = rootProject.file("yishi-release.jks")
-            storePassword = "<KEYSTORE_PASSWORD>"
+            storePassword = localProps.getProperty("yishi.storePassword") ?: ""
             keyAlias = "yishi"
-            keyPassword = "<KEYSTORE_PASSWORD>"
+            keyPassword = localProps.getProperty("yishi.keyPassword") ?: ""
         }
     }
 

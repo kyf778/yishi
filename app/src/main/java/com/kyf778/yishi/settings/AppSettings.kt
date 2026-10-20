@@ -26,7 +26,9 @@ object AiDefaults {
     // NAS 网关（公网 HTTPS，任何网络可达，手机不用装 Tailscale）
     // 网关后面挂着 free-llm-bridge，其中 codebuddy 车道由海外/国内的 CodeBuddy 账号提供
     const val BASE_URL = "https://nas-test.tailacf3df.ts.net/v1"
-    const val API_KEY = "<NAS_GATEWAY_KEY>"
+    // 密钥从 local.properties 注入 BuildConfig，绝不写进源码。
+    // 见 AGENTS.md 铁律三：任何密钥都不准写进源码，推送前必须扫一遍。
+    val API_KEY: String = BuildConfig.NAS_GATEWAY_KEY
 
     // 点名模型，**不要用 free-queue**：
     // 实测 free-queue 是「按容量自动挑车道」的哨兵，会挑到已经不通的 kilo 车道并 404。
@@ -43,12 +45,12 @@ object AiDefaults {
     // 旧配置（Kilo 免费视觉）留作参考：https://api.kilo.ai/api/gateway
     const val VISION_BASE_URL = BASE_URL
     const val VISION_MODEL = MODEL
-    const val VISION_API_KEY = API_KEY
+    val VISION_API_KEY: String = API_KEY
 
     // 兜底：Kilo 免费视觉模型（NAS 网关不通时可用，无需 key）
     const val FALLBACK_VISION_BASE_URL = "https://api.kilo.ai/api/gateway"
     const val FALLBACK_VISION_MODEL = "nvidia/nemotron-3.5-super-vl:free"
-    const val FALLBACK_VISION_API_KEY = ""
+    val FALLBACK_VISION_API_KEY: String = ""
 
     // ── 手机直连 CodeBuddy 的凭据 ────────────────────────────────────
     // 为什么不走 NAS：经 Tailscale Funnel 时 TLS 握手 3.3-7.5s、首字节 7-17s
