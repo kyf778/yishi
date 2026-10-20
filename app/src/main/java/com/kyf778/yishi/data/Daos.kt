@@ -14,7 +14,8 @@ interface MemoryDao {
         """
         SELECT e.id AS eventId, m.id AS memoryId, m.title, m.summary,
                e.deadline_at AS deadlineAt, e.event_type AS eventType,
-               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly
+               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly,
+               e.location AS location, e.extra_note AS extraNote
         FROM countdown_event e
         INNER JOIN memory_item m ON m.id = e.memory_id
         WHERE m.status != 'ARCHIVED' AND e.status NOT IN ('CANCELLED', 'COMPLETED')
@@ -28,7 +29,8 @@ interface MemoryDao {
         """
         SELECT e.id AS eventId, m.id AS memoryId, m.title, m.summary,
                e.deadline_at AS deadlineAt, e.event_type AS eventType,
-               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly
+               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly,
+               e.location AS location, e.extra_note AS extraNote
         FROM countdown_event e
         INNER JOIN memory_item m ON m.id = e.memory_id
         WHERE e.status IN ('CANCELLED', 'COMPLETED')
@@ -42,7 +44,8 @@ interface MemoryDao {
         """
         SELECT e.id AS eventId, m.id AS memoryId, m.title, m.summary,
                e.deadline_at AS deadlineAt, e.event_type AS eventType,
-               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly
+               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly,
+               e.location AS location, e.extra_note AS extraNote
         FROM countdown_event e
         INNER JOIN memory_item m ON m.id = e.memory_id
         WHERE e.id = :eventId
@@ -189,7 +192,8 @@ interface MemoryDao {
         """
         SELECT e.id AS eventId, m.id AS memoryId, m.title, m.summary,
                e.deadline_at AS deadlineAt, e.event_type AS eventType,
-               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly
+               e.priority, e.status, e.created_at AS createdAt, e.date_only AS dateOnly,
+               e.location AS location, e.extra_note AS extraNote
         FROM countdown_event e
         INNER JOIN memory_item m ON m.id = e.memory_id
         INNER JOIN memory_tag mt ON mt.memory_id = m.id
@@ -264,6 +268,20 @@ interface MemoryDao {
 
     @Query("DELETE FROM reminder_rule")
     suspend fun clearReminders()
+
+
+    // ══════════ 补充信息记录 ══════════
+
+    /** 某张卡的补充历史，最新的在前。 */
+    @Query("SELECT * FROM supplement_record WHERE event_id = :eventId ORDER BY created_at DESC")
+    suspend fun supplementHistory(eventId: Long): List<SupplementRecordEntity>
+
+    /** 某张卡被补充过几次。 */
+    @Query("SELECT COUNT(*) FROM supplement_record WHERE event_id = :eventId")
+    suspend fun supplementCount(eventId: Long): Int
+
+    @Insert
+    suspend fun insertSupplement(record: SupplementRecordEntity): Long
 
     @Query("DELETE FROM countdown_event")
     suspend fun clearEvents()

@@ -17,8 +17,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MemoryTagCrossRef::class,
         AiParseRecordEntity::class,
         NotificationLogEntity::class,
+        SupplementRecordEntity::class,
     ],
-    version = 4,
+    version = 6,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -112,6 +113,56 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+
+        /**
+         * v4 → v5：补上 AI 识别了、但一直没落库的两个字段。
+         *
+         * 起因：一条「副班长培训会」的通知里写了「培训地点：30107」、
+         * 「24级、25级、26级全体副班长」、「有课的8:20下课来」，AI 全都识别出来了，
+         * 但建卡时只取了标题/摘要/时间，地点和补充说明直接丢弃 ——
+         * 因为数据库根本没有列可以存。用户看到卡片才发现「吞掉了好多内容」。
+         *
+         * location     : 地点（会议室号、线上会议链接等）
+         * extra_note   : 范围限定、弹性时间等散装信息
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE countdown_event ADD COLUMN location TEXT")
+                db.execSQL("ALTER TABLE countdown_event ADD COLUMN extra_note TEXT")
+            }
+        }
+
+
+        /**
+         * v5 → v6：新增 supplement_record 表，记录「补充信息」的历史。
+         *
+         * 需求：已建好的卡片，后续收到补充信息（群里说「改到晚上8点」「地点换302」）时，
+         * 用户希望能再提交截图追加，而不是新建重复卡片。
+         *
+         * 每次补充都在这个表里留一条记录：改了哪些字段、旧的什么、新的什么。
+         * 这样详情页可以展示「补充历史」，避免信息被黑箱覆盖。
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS supplement_record (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        event_id INTEGER NOT NULL,
+                        source_text TEXT,
+                        changes_json TEXT NOT NULL,
+                        raw_result_json TEXT,
+                        created_at INTEGER NOT NULL,
+                        FOREIGN KEY (event_id) REFERENCES countdown_event(id)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_supplement_record_event_id ON supplement_record(event_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_supplement_record_created_at ON supplement_record(created_at)")
+            }
+        }
+
         @Volatile private var instance: AppDatabase? = null
 
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
@@ -120,7 +171,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 "yishi.db",
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build().also { instance = it }
         }
     }

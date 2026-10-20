@@ -209,6 +209,8 @@ class MemoryRepository(private val db: AppDatabase) {
         remindersMinutes: List<Int> = listOf(1440, 60),
         tagNames: List<String> = emptyList(),
         dateOnly: Boolean = false,
+        location: String? = null,
+        extraNote: String? = null,
     ): Long {
         require(title.isNotBlank()) { "标题不能为空" }
         require(deadlineAt > System.currentTimeMillis()) { "截止时间必须晚于当前时间" }
@@ -268,6 +270,8 @@ class MemoryRepository(private val db: AppDatabase) {
                     eventType = eventType,
                     priority = priority,
                     dateOnly = dateOnly,
+                    location = location?.trim()?.takeIf { it.isNotBlank() },
+                    extraNote = extraNote?.trim()?.takeIf { it.isNotBlank() },
                     createdAt = now,
                 ),
             )
@@ -306,7 +310,13 @@ class MemoryRepository(private val db: AppDatabase) {
     }
 
     /** 编辑事项：标题/备注/截止时间。时间变了必须作废旧提醒并按新时间重排。 */
-    suspend fun updateEvent(eventId: Long, title: String, summary: String, deadlineAt: Long): Boolean {
+    suspend fun updateEvent(
+        eventId: Long,
+        title: String,
+        summary: String,
+        deadlineAt: Long,
+        dateOnly: Boolean = false,
+    ): Boolean {
         require(title.isNotBlank()) { "标题不能为空" }
         require(deadlineAt > System.currentTimeMillis()) { "截止时间必须晚于当前时间" }
         return db.withTransaction {
@@ -323,6 +333,7 @@ class MemoryRepository(private val db: AppDatabase) {
             if (deadlineAt != oldDeadline) {
                 dao.updateEvent(event.copy(
                     deadlineAt = deadlineAt,
+                    dateOnly = dateOnly,
                     localDeadline = java.time.Instant.ofEpochMilli(deadlineAt).atZone(ZoneId.systemDefault()).toLocalDateTime().toString(),
                     // 时间改到未来了，就从逾期拉回正常状态
                     status = "UPCOMING",
@@ -437,6 +448,160 @@ class MemoryRepository(private val db: AppDatabase) {
             }
         }
     }
+
+
+    /**
+     * 把一条「补充信息」合并进已有卡片。
+     *
+     * 场景：通知先说「10月23日晚7点 地点30107」，建卡后群里又发「改到晚上8点」。
+     * 用户再提交一次截图，AI 只提取变更内容，这里负责合并。
+     *
+     * 合并规则（已与用户确认）：
+     *  - 时间和地点：新信息覆盖旧值（因为是变更）
+     *  - 补充说明：追加，用「；」分隔，不丢旧内容
+     *  - 摘要：只在旧摘要为空时才写入
+     *  - 标题：不覆盖
+     *  - 时间变了 → 重排提醒
+     *
+     * 每次合并都写一条 supplement_record，记录改了哪些字段（旧值/新值）。
+     */
+    suspend fun applySupplement(
+        eventId: Long,
+        newDeadline: Long? = null,
+        newLocation: String? = null,
+        newNote: String? = null,
+        newSummary: String? = null,
+        sourceText: String? = null,
+        rawResultJson: String? = null,
+        dateOnly: Boolean = false,
+    ): List<String> = db.withTransaction {
+        val event = dao.getEvent(eventId) ?: return@withTransaction emptyList()
+        val memory = dao.getMemory(event.memoryId) ?: return@withTransaction emptyList()
+        val now = System.currentTimeMillis()
+
+        val changes = mutableListOf<String>()
+        val changeList = mutableListOf<Triple<String, String, String>>()  // field, old, new
+
+        var updatedEvent = event
+        var deadlineChanged = false
+
+        // 时间：覆盖
+        if (newDeadline != null && newDeadline != event.deadlineAt) {
+            val oldText = java.time.Instant.ofEpochMilli(event.deadlineAt)
+                .atZone(ZoneId.systemDefault()).toLocalDateTime().toString()
+            val newText = java.time.Instant.ofEpochMilli(newDeadline)
+                .atZone(ZoneId.systemDefault()).toLocalDateTime().toString()
+            changeList.add(Triple("deadline", oldText, newText))
+            changes.add("时间：" + oldText + " → " + newText)
+
+            updatedEvent = updatedEvent.copy(
+                deadlineAt = newDeadline,
+                localDeadline = newText,
+                dateOnly = dateOnly,
+                status = if (newDeadline > now) "UPCOMING" else "OVERDUE",
+                completedAt = null,
+                updatedAt = now,
+            )
+            deadlineChanged = true
+        }
+
+        // 地点：覆盖
+        if (!newLocation.isNullOrBlank() && newLocation != event.location) {
+            changeList.add(Triple("location", event.location ?: "", newLocation))
+            changes.add("地点：" + (event.location ?: "（无）") + " → " + newLocation)
+            updatedEvent = updatedEvent.copy(location = newLocation, updatedAt = now)
+        }
+
+        // 补充说明：追加
+        if (!newNote.isNullOrBlank()) {
+            val oldNote = event.extraNote.orEmpty()
+            if (!oldNote.contains(newNote)) {
+                val merged = if (oldNote.isBlank()) newNote else oldNote + "；" + newNote
+                changeList.add(Triple("extra_note", oldNote, merged))
+                changes.add("补充：" + newNote)
+                updatedEvent = updatedEvent.copy(extraNote = merged, updatedAt = now)
+            }
+        }
+
+        // 摘要：只在旧摘要为空时写入
+        if (!newSummary.isNullOrBlank() && memory.summary.isBlank()) {
+            dao.updateMemory(memory.copy(summary = newSummary, body = newSummary, updatedAt = now))
+            changes.add("摘要：" + newSummary)
+        }
+
+        if (changes.isEmpty()) return@withTransaction emptyList()
+
+        dao.updateEvent(updatedEvent)
+
+        // 留档
+        val changesJson = buildChangesJson(changeList)
+        dao.insertSupplement(
+            SupplementRecordEntity(
+                eventId = eventId,
+                sourceText = sourceText,
+                changesJson = changesJson,
+                rawResultJson = rawResultJson,
+                createdAt = now,
+            ),
+        )
+
+        // 时间变了就重排提醒
+        if (deadlineChanged) {
+            dao.deleteRemindersForEvent(eventId)
+            adaptiveReminders(updatedEvent.deadlineAt, now, listOf(1440, 60), dateOnly)
+                .distinct()
+                .forEach { offset ->
+                    val trigger = quietHoursAdjust(updatedEvent.deadlineAt - offset * 60_000L, now)
+                    if (trigger > now) {
+                        dao.insertReminder(
+                            ReminderRuleEntity(
+                                eventId = eventId,
+                                offsetMinutes = offset,
+                                triggerAt = trigger,
+                                notificationId = stableNotificationId(eventId, offset),
+                            ),
+                        )
+                    }
+                }
+        }
+
+        changes
+    }
+
+    /** 把变更列表拼成 JSON。用 StringBuilder 手工拼，避免依赖序列化库。 */
+    private fun buildChangesJson(list: List<Triple<String, String, String>>): String {
+        val sb = StringBuilder("{")
+        list.forEachIndexed { i, (field, oldV, newV) ->
+            if (i > 0) sb.append(",")
+            sb.append('"').append(field).append("\":{")
+            sb.append("\"old\":").append(jsonStr(oldV))
+            sb.append(",\"new\":").append(jsonStr(newV))
+            sb.append("}")
+        }
+        sb.append("}")
+        return sb.toString()
+    }
+
+    /** 最简 JSON 字符串转义。 */
+    private fun jsonStr(s: String): String {
+        val sb = StringBuilder("\"")
+        for (ch in s) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> sb.append(ch)
+            }
+        }
+        sb.append("\"")
+        return sb.toString()
+    }
+
+    /** 某张卡的补充历史。 */
+    suspend fun supplementHistory(eventId: Long): List<SupplementRecordEntity> =
+        dao.supplementHistory(eventId)
 
     private fun stableNotificationId(eventId: Long, offsetMinutes: Int): Int =
         UUID.nameUUIDFromBytes("yishi:$eventId:$offsetMinutes".toByteArray()).hashCode() and Int.MAX_VALUE

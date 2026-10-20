@@ -62,11 +62,26 @@ class ReminderWorker(
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
 
-            val leadText = when {
-                reminder.offsetMinutes <= 0 -> "现在到截止时间了"
-                reminder.offsetMinutes < 60 -> "还有 ${reminder.offsetMinutes} 分钟截止"
-                reminder.offsetMinutes % 60 == 0 -> "还有 ${reminder.offsetMinutes / 60} 小时截止"
-                else -> "距离截止还有 ${reminder.offsetMinutes} 分钟"
+            // 纯日期事项：提醒是「前一天 21:00」，说的是"明天要做这件事"，
+            // 不能说「还有 1619 分钟截止」这种按钟点倒数的话。
+            val leadText = if (card.dateOnly) {
+                val zone = java.time.ZoneId.systemDefault()
+                val deadlineDate = java.time.Instant.ofEpochMilli(card.deadlineAt).atZone(zone).toLocalDate()
+                val today = java.time.LocalDate.now(zone)
+                val days = java.time.temporal.ChronoUnit.DAYS.between(today, deadlineDate)
+                when {
+                    days == 0L -> "今天要做"
+                    days == 1L -> "明天要做"
+                    days > 1L -> "还有 $days 天"
+                    else -> "已经过去了"
+                }
+            } else {
+                when {
+                    reminder.offsetMinutes <= 0 -> "现在到截止时间了"
+                    reminder.offsetMinutes < 60 -> "还有 ${reminder.offsetMinutes} 分钟截止"
+                    reminder.offsetMinutes % 60 == 0 -> "还有 ${reminder.offsetMinutes / 60} 小时截止"
+                    else -> "距离截止还有 ${reminder.offsetMinutes} 分钟"
+                }
             }
             val dueText = formatDue(card.deadlineAt, card.dateOnly)
             val summary = card.summary.trim()

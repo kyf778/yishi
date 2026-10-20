@@ -3,6 +3,7 @@ package com.kyf778.yishi.ai
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -87,6 +88,83 @@ class CodeBuddyDirectProvider(
      * 用户可能一张截图里有好几件事（如"10月20日开班会" + "10月25日交报告"），
      * 让模型全列出来，再由用户在确认页勾选要建哪些。
      */
+/**
+     * 识别「补充信息」—— 只提取变更内容，不要求有完整的时间或标题。
+     *
+     * 与 extractAllDeadlines 的区别：
+     *  - 允许 title 为空（补充信息往往只说"改到302"）
+     *  - 允许 deadline 为空（可能只改地点）
+     *  - 不重试：识别不出来就返回空，由界面提示"没发现新信息"
+     *
+     * 返回的 ExtractedMemory 里，哪个字段非空就说明这项有变更。
+     */
+    suspend fun extractSupplement(input: AiInput): Result<ExtractedMemory?> {
+        return try {
+            val body = buildRequestBody(input, multi = false)
+            val sse = postChat(body)
+            val content = parseSse(sse)
+            if (content.isBlank()) {
+                Result.failure(AiProviderException("AI 返回空内容"))
+            } else {
+                val obj = parseLooseSupplement(content, input.timezone)
+                Result.success(obj)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Result.failure(AiProviderException(e.message ?: "识别失败", retryable = true))
+        }
+    }
+
+    /**
+     * 宽松解析：不要求 JSON 完整符合 ExtractedMemory 的结构。
+     * 从返回文本里抠出 JSON，能解析出多少算多少；缺字段就用默认值。
+     */
+    private fun parseLooseSupplement(raw: String, fallbackTimezone: String): ExtractedMemory? {
+        val candidate = extractJsonBlock(raw)
+        if (candidate.isBlank()) return null
+
+        // 先试包装 / 数组 / 单对象三种
+        val direct: ExtractedMemory? = when {
+            candidate.startsWith("[") ->
+                runCatching { json.decodeFromString<List<ExtractedMemory>>(candidate) }.getOrNull()?.firstOrNull()
+            candidate.startsWith("{") ->
+                runCatching { json.decodeFromString<MemoriesWrapper>(candidate) }.getOrNull()?.memories?.firstOrNull()
+                    ?: runCatching { json.decodeFromString<ExtractedMemory>(candidate) }.getOrNull()
+            else -> null
+        }
+        if (direct != null) {
+            // 宽松版不做严格校验：时间格式错了就当没有
+            return direct.copy(
+                deadline = direct.deadline?.takeIf {
+                    it.isNotBlank() && DeadlineParser.parse(it, direct.timezone ?: fallbackTimezone) != null
+                },
+                timezone = direct.timezone ?: fallbackTimezone,
+            )
+        }
+
+        // 兜底：手工从 JSON 里抠字段，应对模型返回半截 JSON 的情况
+        val loc = Regex("\"location\"\\s*:\\s*\"([^\"]*)\"")
+            .find(candidate)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+        val note = Regex("\"notes\"\\s*:\\s*\"([^\"]*)\"")
+            .find(candidate)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+        val dl = Regex("\"deadline\"\\s*:\\s*\"([^\"]*)\"")
+            .find(candidate)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+        val title = Regex("\"title\"\\s*:\\s*\"([^\"]*)\"")
+            .find(candidate)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+
+        if (loc == null && note == null && dl == null) return null
+        return ExtractedMemory(
+            title = title ?: "",
+            summary = "",
+            deadline = dl?.takeIf { DeadlineParser.parse(it, fallbackTimezone) != null },
+            timezone = fallbackTimezone,
+            location = loc,
+            notes = note,
+            confidence = 0.8,
+        )
+    }
+
     override suspend fun extractAllDeadlines(input: AiInput): Result<List<ExtractedMemory>> {
         var lastFailure: Throwable? = null
         for (attempt in 1..MAX_ATTEMPTS) {
@@ -285,21 +363,67 @@ class CodeBuddyDirectProvider(
     }
 
     /** 解析多事项结果（模型可能给数组，也可能只给一个对象）。 */
+    /**
+     * 解析模型返回的 JSON。
+     *
+     * 模型实际会返回好几种形状，都得认：
+     *   1. 裸数组        [{"title":...}, {...}]
+     *   2. 包装对象      {"memories":[{"title":...}]}
+     *   3. 单个对象      {"title":...}
+     *   4. 以上任意一种外面套 ```json ``` 代码块
+     *
+     * 之前只处理了 1 和 3。模型偶尔返回 2（短输入、且提示词提到 memories 字段时），
+     * 就会报「AI 返回的 JSON 无法解析」，功能直接不可用。
+     */
     private fun parseExtractedList(raw: String, fallbackTimezone: String): List<ExtractedMemory> {
-        val candidate = raw.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        val list = if (candidate.startsWith("[")) {
+        val candidate = extractJsonBlock(raw)
+        if (candidate.isBlank()) throw AiProviderException("AI 没有返回 JSON 内容")
+
+        // 1. 裸数组
+        if (candidate.startsWith("[")) {
             runCatching { json.decodeFromString<List<ExtractedMemory>>(candidate) }.getOrNull()
-                ?: throw AiProviderException("AI 返回的 JSON 无法解析")
-        } else {
-            val one = runCatching { json.decodeFromString<ExtractedMemory>(candidate) }
-                .getOrElse { throw AiProviderException("AI 返回的 JSON 无法解析") }
-            listOf(one)
+                ?.let { return sanitize(it, fallbackTimezone) }
         }
-        // 逐个校验：坏的那条跳过，不让整批作废
-        return list.mapNotNull { item ->
+
+        if (candidate.startsWith("{")) {
+            // 2. {"memories":[...]} 包装
+            runCatching { json.decodeFromString<MemoriesWrapper>(candidate) }.getOrNull()
+                ?.takeIf { it.memories.isNotEmpty() }
+                ?.let { return sanitize(it.memories, fallbackTimezone) }
+
+            // 3. 单个对象
+            runCatching { json.decodeFromString<ExtractedMemory>(candidate) }.getOrNull()
+                ?.let { return sanitize(listOf(it), fallbackTimezone) }
+        }
+
+        throw AiProviderException("AI 返回的 JSON 无法解析")
+    }
+
+    /** 从模型返回里抠出 JSON 主体：去掉 ```json 围栏，截取首尾括号之间。 */
+    private fun extractJsonBlock(raw: String): String {
+        var s = raw.trim()
+        s = s.replace(Regex("^```(?:json)?\\s*", RegexOption.IGNORE_CASE), "")
+        s = s.replace(Regex("\\s*```$"), "")
+        s = s.trim()
+
+        val objStart = s.indexOf('{')
+        val arrStart = s.indexOf('[')
+        val start = when {
+            objStart < 0 && arrStart < 0 -> return ""
+            objStart < 0 -> arrStart
+            arrStart < 0 -> objStart
+            else -> minOf(objStart, arrStart)
+        }
+        val end = maxOf(s.lastIndexOf('}'), s.lastIndexOf(']'))
+        if (end <= start) return ""
+        return s.substring(start, end + 1)
+    }
+
+    /** 逐条校验：坏的那条跳过，不让整批作废。 */
+    private fun sanitize(list: List<ExtractedMemory>, fallbackTimezone: String): List<ExtractedMemory> =
+        list.mapNotNull { item ->
             runCatching { validate(item, fallbackTimezone) }.getOrNull()
         }
-    }
 
     private fun validate(parsed: ExtractedMemory, fallbackTimezone: String): ExtractedMemory {
         require(parsed.title.isNotBlank()) { "AI 未识别出标题" }
@@ -349,6 +473,28 @@ class CodeBuddyDirectProvider(
   - "下午78节"这类课节表述属于"没有具体钟点"，只写进 notes，deadline 只给日期、dateOnly=true。
   - 这个标记很重要：App 对 dateOnly 的事项会**在前一天晚上 21:00 提醒**，
     而不是按小时倒数（否则会在半夜把人吵醒）。
+
+【location 和 notes：不要把细节丢掉】
+通知里除了标题和时间，常常还有几类关键信息。它们必须落到对应字段，
+绝不能因为「summary 只写一句话」就丢掉。
+
+- location（地点）：
+  「培训地点：30107」「腾讯会议 123-456-789」「实验楼 A301」「线上」
+  → 只填地点本身，不要带「地点：」这类前缀。没有就返回 null。
+
+- notes（补充说明）：
+  装那些 summary 放不下的散装信息，尤其是这三类：
+  ① 适用范围：「24级、25级、26级全体副班长」「仅限本班同学」
+  ② 弹性/变更时间：「改到晚上8点」「有课的8:20下课来」「推迟半小时」
+  ③ 硬性要求：「带学生证」「穿正装」「需提前10分钟到场」
+  → 可以写多句，用「；」分隔。没有就返回 null。
+
+- summary（摘要）：
+  写「做什么 + 要准备什么」，控制在两句话内。
+  ⚠️ 但**地点和范围限定不写进 summary**，它们有专门的字段。
+
+判断原则：凡是原文里出现、但 title 和 deadline 都装不下的关键信息，
+都要落到 location 或 notes 里。宁可 notes 长一点，也不要吞掉内容。
 
 ⚠️ 优先级规则：如果"用户补充说明"里提到了用户自己要做什么的时间
 （如"明天中午十二点发给妈妈"），这个时间【优先于】图片里别人写的截止日期。
@@ -460,3 +606,7 @@ confidence(number 0..1), evidence(array of strings).
         }
     }
 }
+
+/** 模型有时返回 {"memories":[...]} 的包装格式，这里对应它。 */
+@Serializable
+private data class MemoriesWrapper(val memories: List<ExtractedMemory> = emptyList())

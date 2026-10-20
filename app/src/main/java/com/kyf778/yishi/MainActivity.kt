@@ -45,6 +45,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.List
@@ -53,6 +54,8 @@ import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -65,6 +68,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FloatingActionButton
@@ -191,6 +196,7 @@ private fun YishiApp() {
     var batchDeletePending by remember { mutableStateOf(false) }
     var batchCompletePending by remember { mutableStateOf(false) }
     var restoreTarget by remember { mutableStateOf<CountdownCard?>(null) }
+    var supplementTarget by remember { mutableStateOf<CountdownCard?>(null) }
 
     // 进入前台就刷新逾期状态并重新排提醒：只跑一次的话，App 长期挂在后台时
     // 事项会一直显示"还剩 x 天"而不会变成"已逾期"。
@@ -302,9 +308,11 @@ private fun YishiApp() {
     if (showAdd) {
         ManualAddDialog(
             onDismiss = { showAdd = false },
-            onSave = { title, summary, deadline ->
+            onSave = { title, summary, deadline, dateOnly ->
                 scope.launch {
-                    val eventId = repository.createManualCountdown(title, summary, deadline)
+                    val eventId = repository.createManualCountdown(
+                        title, summary, deadline, dateOnly = dateOnly,
+                    )
                     repository.futureReminders().filter { it.eventId == eventId }.forEach(scheduler::schedule)
                     showAdd = false
                 }
@@ -326,15 +334,18 @@ private fun YishiApp() {
             onDelete = {
                 deleteTarget = card
             },
+            onSupplement = { supplementTarget = card },
         )
     }
     editing?.let { card ->
         EditDialog(
             card = card,
             onDismiss = { editing = null },
-            onSave = { title, summary, deadline ->
+            onSave = { title, summary, deadline, dateOnly ->
                 scope.launch {
-                    repository.updateEvent(card.eventId, title, summary, deadline)
+                    repository.updateEvent(
+                        card.eventId, title, summary, deadline, dateOnly = dateOnly,
+                    )
                     scheduler.rescheduleAll()
                     editing = null
                 }
@@ -408,6 +419,15 @@ private fun YishiApp() {
         )
     }
 
+    // 补充信息
+    supplementTarget?.let { card ->
+        SupplementDialog(
+            card = card,
+            onDismiss = { supplementTarget = null },
+            onApplied = { supplementTarget = null },
+        )
+    }
+
     // 恢复
     restoreTarget?.let { card ->
         ConfirmDialog(
@@ -453,8 +473,18 @@ private fun CountdownHome(
                 it.title.contains(q, ignoreCase = true) || it.summary.contains(q, ignoreCase = true)
             }
         }
-        // 固定按截止时间升序（最早的排最前）
-        filtered.sortedBy { it.deadlineAt }
+        // 按截止时间升序（最早的排最前）。
+        // 纯日期事项按「当天 00:00」参与排序 —— 它的 23:59 只是占位，
+        // 拿占位值排序会把它挤到同日有钟点事项的后面，而"这天做完"应该更靠前。
+        filtered.sortedBy { card ->
+            if (card.isDateOnly()) {
+                val zone = ZoneId.systemDefault()
+                val d = java.time.Instant.ofEpochMilli(card.deadlineAt).atZone(zone).toLocalDate()
+                d.atStartOfDay(zone).toInstant().toEpochMilli()
+            } else {
+                card.deadlineAt
+            }
+        }
     }
 
     val inSelectMode = selected.isNotEmpty()
@@ -648,6 +678,76 @@ private fun themeFor(eventType: String, overdue: Boolean): CardTheme {
     }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  纯日期事项的统一处理
+//
+//  核心概念：纯日期事项（dateOnly=true）的 deadlineAt 只是一个"占位"，
+//  真正有意义的只有**日期**。任何按毫秒差、按小时、按分钟的算法都算错了。
+//
+//  所以所有跟时间相关的显示，都必须先问一句「这是纯日期吗」，
+//  走两条完全不同的分支。
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 从用户输入的时间文本判断「是否只精确到日」。
+ *
+ * 手动新增/编辑用的也是同一个宽容解析器，输入「2026-10-20」会被补成 23:59，
+ * 但那只是占位 —— 用户明显没写钟点，就该按纯日期处理。
+ *
+ * 判断依据：文本里有没有钟点（HH:mm、点、时、分）。
+ */
+private fun inferDateOnlyFromInput(text: String): Boolean {
+    val s = text.trim()
+    if (s.isBlank()) return false
+    // 有 ":" 或 "：" 视为有时刻
+    if (s.contains(":") || s.contains("：")) return false
+    // 有「点/时/分」也视为有时刻
+    if (s.contains("点") || s.contains("时") || s.contains("分")) return false
+    // 有 am/pm 也视为有时刻
+    if (s.contains("am", ignoreCase = true) || s.contains("pm", ignoreCase = true)) return false
+    return true
+}
+
+/** 纯日期事项距离今天还有几天（0=今天，1=明天，负数=已过）。 */
+private fun daysUntil(dateOnlyMillis: Long): Long {
+    val zone = ZoneId.systemDefault()
+    val target = java.time.Instant.ofEpochMilli(dateOnlyMillis).atZone(zone).toLocalDate()
+    val today = java.time.LocalDate.now(zone)
+    return java.time.temporal.ChronoUnit.DAYS.between(today, target)
+}
+
+/**
+ * 纯日期事项的「剩余」显示 —— 只给天数，绝不给小时。
+ *
+ *  今天   → ("今天", "")
+ *  明天   → ("1", "天")
+ *  后天   → ("2", "天")
+ *  已过 N 天 → ("已过", "N 天")
+ *
+ * 返回 (数字, 单位)，与 formatRemaining 的签名兼容，但单位可能是空串。
+ */
+private fun formatRemainingDateOnly(millis: Long): Pair<String, String> {
+    val d = daysUntil(millis)
+    return when {
+        d == 0L -> "今天" to ""
+        d > 0L -> "$d" to "天"
+        else -> "已过" to "${-d} 天"
+    }
+}
+
+/**
+ * 纯日期事项的卡片右上角标签。
+ * 今天截止的不写「还剩」，直接说「今天」。
+ */
+private fun dateOnlyLabel(millis: Long): String {
+    val d = daysUntil(millis)
+    return when {
+        d == 0L -> "今天"
+        d > 0L -> "还剩"
+        else -> "已过期"
+    }
+}
+
 /**
  * 把剩余时间格式化成「数字 + 单位」。
  *
@@ -687,13 +787,12 @@ private fun isDayOnly(value: Long): Boolean {
 private fun CountdownCard.isDateOnly(): Boolean = dateOnly || isDayOnly(deadlineAt)
 
 /** 「今天 14:30」「明天」「10月21日 16:00」「10月21日」——比纯数字更直观。 */
-private fun formatDeadlineFriendly(value: Long): String {
+private fun formatDeadlineFriendly(value: Long, forceDateOnly: Boolean = false): String {
     val zone = ZoneId.systemDefault()
     val target = java.time.Instant.ofEpochMilli(value).atZone(zone)
     val today = java.time.LocalDate.now(zone)
-    // 纯日期（LLM 只给了"10月20日"这种）：一律显示「10月20日」，
-    // 不写"后天"这类相对说法，也不写任何钟点。
-    if (isDayOnly(value)) {
+    // 纯日期：一律显示「10月20日」，不写相对说法，也不写任何钟点。
+    if (forceDateOnly || isDayOnly(value)) {
         return target.format(DateTimeFormatter.ofPattern("M月d日"))
     }
     val time = target.format(DateTimeFormatter.ofPattern(" HH:mm"))
@@ -753,10 +852,30 @@ private fun CountdownCardView(card: CountdownCard, now: Long) {
     val totalMs = card.deadlineAt - card.createdAt
     val elapsedMs = now - card.createdAt
 
-    val (remainValue, remainUnit) = formatRemaining(remaining)
+    // 纯日期事项不按毫秒算，只按「还有几天」
+    val isDateOnly = card.isDateOnly()
+    val (remainValue, remainUnit) = if (isDateOnly) {
+        formatRemainingDateOnly(card.deadlineAt)
+    } else {
+        formatRemaining(remaining)
+    }
     // 「已过 X/Y 天」：X 是已过天数，Y 是创建到截止的总天数
-    val totalDays = if (totalMs > 0) maxOf(1L, totalMs / 86_400_000L) else 1L
-    val elapsedDays = (elapsedMs / 86_400_000L).coerceIn(0L, totalDays)
+    // 纯日期事项按「日历日差」算，避免 23:59 占位值让进度差一天
+    val totalDays: Long
+    val elapsedDays: Long
+    if (isDateOnly) {
+        val zone = ZoneId.systemDefault()
+        val createdDate = java.time.Instant.ofEpochMilli(card.createdAt.let { if (it > 0) it else now })
+            .atZone(zone).toLocalDate()
+        val deadlineDate = java.time.Instant.ofEpochMilli(card.deadlineAt).atZone(zone).toLocalDate()
+        totalDays = maxOf(1L, java.time.temporal.ChronoUnit.DAYS.between(createdDate, deadlineDate))
+        elapsedDays = java.time.temporal.ChronoUnit.DAYS
+            .between(createdDate, java.time.LocalDate.now(zone))
+            .coerceIn(0L, totalDays)
+    } else {
+        totalDays = if (totalMs > 0) maxOf(1L, totalMs / 86_400_000L) else 1L
+        elapsedDays = (elapsedMs / 86_400_000L).coerceIn(0L, totalDays)
+    }
     val progress = (elapsedDays.toFloat() / totalDays.toFloat()).coerceIn(0f, 1f)
 
     val theme = themeFor(card.eventType, overdue)
@@ -813,7 +932,13 @@ private fun CountdownCardView(card: CountdownCard, now: Long) {
                     modifier = Modifier.weight(1f).padding(end = 12.dp),
                 )
                 Column(horizontalAlignment = Alignment.End) {
-                    Text(if (overdue) "已逾期" else "还剩", color = theme.accent, fontSize = 12.sp)
+                    Text(
+                        if (overdue) "已逾期"
+                        else if (isDateOnly) dateOnlyLabel(card.deadlineAt)
+                        else "还剩",
+                        color = theme.accent,
+                        fontSize = 12.sp,
+                    )
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
                             text = remainValue,
@@ -880,7 +1005,10 @@ private fun CountdownCardView(card: CountdownCard, now: Long) {
 }
 
 @Composable
-private fun ManualAddDialog(onDismiss: () -> Unit, onSave: (String, String, Long) -> Unit) {
+private fun ManualAddDialog(
+    onDismiss: () -> Unit,
+    onSave: (String, String, Long, Boolean) -> Unit,
+) {
     var title by remember { mutableStateOf("") }
     var summary by remember { mutableStateOf("") }
     var deadlineText by remember { mutableStateOf("") }
@@ -913,7 +1041,7 @@ private fun ManualAddDialog(onDismiss: () -> Unit, onSave: (String, String, Long
         },
         confirmButton = {
             Button(
-                onClick = { parsed?.let { onSave(title, summary, it) } },
+                onClick = { parsed?.let { onSave(title, summary, it, inferDateOnlyFromInput(deadlineText)) } },
                 enabled = title.isNotBlank() && deadlineError == null && parsed != null,
             ) { Text("保存") }
         },
@@ -991,6 +1119,9 @@ private fun ImportDialog(onDismiss: () -> Unit, onSaved: () -> Unit) {
             remindersMinutes = suggested.ifEmpty { listOf(1440, 60) },
             dateOnly = item.dateOnly,
             tagNames = tagsFor(item),
+            // AI 识别出来的地点和补充说明，之前一律被丢弃，现在存下来
+            location = item.location,
+            extraNote = item.notes,
         )
         repository.futureReminders().filter { it.eventId == eventId }.forEach(scheduler::schedule)
         if (closeDialog) {
@@ -1406,6 +1537,271 @@ private fun ImportDialog(onDismiss: () -> Unit, onSaved: () -> Unit) {
  * 相比上一版去掉了：中间那行重复的大标题（和回显条重复）、
  * 过高的卡片（从 88% 高改成自适应，内容多少就多高）。
  */
+/**
+ * 「补充信息」对话框 —— 给已有卡片追加截图更新。
+ *
+ * 场景：通知先说「10月23日晚7点 地点30107」建了卡，群里又发「改到晚上8点」。
+ * 用户从卡片详情页点进来，选截图或打字，AI 提取变更内容，合并进原卡。
+ *
+ * 流程：选截图 → AI 识别 → 展示「将要改什么」→ 确认 → 合并
+ */
+@Composable
+private fun SupplementDialog(
+    card: CountdownCard,
+    onDismiss: () -> Unit,
+    onApplied: (List<String>) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val repository = remember { MemoryRepository(AppDatabase.get(context)) }
+    val scheduler = remember { ReminderScheduler(context, repository) }
+
+    var stage by remember { mutableStateOf("pick") }
+    var typedText by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var extracted by remember { mutableStateOf<ExtractedMemory?>(null) }
+    var sourceText by remember { mutableStateOf<String?>(null) }
+    var rawJson by remember { mutableStateOf<String?>(null) }
+    var changes by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    // 与主识别流程共用同一套 provider 构造（AI 凭据来自 BuildConfig）
+    fun localProvider(): CodeBuddyDirectProvider = CodeBuddyDirectProvider(
+        accessToken = AiDefaults.CODEBUDDY_ACCESS_TOKEN,
+        refreshToken = AiDefaults.CODEBUDDY_REFRESH_TOKEN,
+        model = AiDefaults.MODEL,
+    )
+
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(5),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            stage = "loading"
+            error = null
+            scope.launch {
+                runCatching {
+                    // 复用主流程的图片处理：切成多块 + 压缩 + 转 data URL
+                    val tiles = withContext(Dispatchers.IO) {
+                        uris.flatMap { readAndCompressMulti(context, it) }
+                    }
+                    val dataUrls = tiles.map { OpenAiCompatibleProvider.imageDataUrl(it, "image/jpeg") }
+                    if (dataUrls.isEmpty()) throw IllegalStateException("图片读取失败")
+
+                    val provider = localProvider()
+                    val first = provider.extractSupplement(
+                        AiInput(
+                            "这是对已有事项的补充信息，请提取其中的变更内容（新时间、新地点、附加说明）。",
+                            null,
+                            nowIso(),
+                            ZoneId.systemDefault().id,
+                            imageDataUrls = dataUrls,
+                        ),
+                    ).getOrThrow() ?: throw IllegalStateException("没识别出任何内容")
+
+                    extracted = first
+                    rawJson = first.toString()
+                    sourceText = "补充截图：" + uris.size + " 张"
+                    stage = "preview"
+                }.onFailure {
+                    error = it.message ?: "识别失败"
+                    stage = "pick"
+                }
+            }
+        }
+    }
+
+    fun recognizeText() {
+        if (typedText.isBlank()) return
+        stage = "loading"
+        error = null
+        scope.launch {
+            runCatching {
+                val first = localProvider().extractSupplement(
+                    AiInput(
+                        "这是对已有事项的补充信息，请提取其中的变更内容：\n" + typedText,
+                        null,
+                        nowIso(),
+                        ZoneId.systemDefault().id,
+                    ),
+                ).getOrThrow() ?: throw IllegalStateException("没识别出任何内容")
+                extracted = first
+                rawJson = first.toString()
+                sourceText = typedText
+                stage = "preview"
+            }.onFailure {
+                error = it.message ?: "识别失败"
+                stage = "pick"
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("补充信息", fontSize = 17.sp, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    "给「" + card.title + "」补充",
+                    fontSize = 12.sp,
+                    color = Color(0xFF5A6376),
+                )
+
+                when (stage) {
+                    "pick" -> {
+                        Text(
+                            "再提交一次截图或输入文字，AI 会提取变更内容并合并进来。",
+                            fontSize = 13.sp,
+                            color = Color.Gray,
+                        )
+
+                        Button(
+                            onClick = {
+                                picker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Default.Image, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("选择截图")
+                        }
+
+                        OutlinedTextField(
+                            value = typedText,
+                            onValueChange = { typedText = it },
+                            label = { Text("或者直接打字（如：改到晚上8点）") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 2,
+                            maxLines = 4,
+                        )
+
+                        if (typedText.isNotBlank()) {
+                            Button(
+                                onClick = { recognizeText() },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("识别这段文字") }
+                        }
+                    }
+
+                    "loading" -> {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text("AI 正在识别…", fontSize = 13.sp, color = Color.Gray)
+                        }
+                    }
+
+                    "preview" -> {
+                        val ex = extracted
+                        if (ex != null) {
+                            Text("识别结果", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+
+                            val newDl = DeadlineParser.parse(ex.deadline, ex.timezone)
+                            val timeChanged = newDl != null && newDl != card.deadlineAt
+                            val locChanged = !ex.location.isNullOrBlank() && ex.location != card.location
+                            val noteNew = ex.notes?.takeIf { it.isNotBlank() }
+
+                            if (!timeChanged && !locChanged && noteNew == null) {
+                                Text(
+                                    "没发现新信息。识别到的和现有内容一致。",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFFD55245),
+                                )
+                            } else {
+                                if (timeChanged && newDl != null) {
+                                    Text(
+                                        "时间：" + formatDeadlineFriendly(card.deadlineAt) +
+                                            " → " + formatDeadlineFriendly(newDl),
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF4F6BFF),
+                                    )
+                                }
+                                if (locChanged) {
+                                    Text(
+                                        "地点：" + (card.location ?: "（无）") + " → " + ex.location,
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF4F6BFF),
+                                    )
+                                }
+                                if (noteNew != null) {
+                                    Text(
+                                        "补充：" + noteNew,
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF4F6BFF),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    "done" -> {
+                        Text("已合并", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF2E9184))
+                        changes.forEach { c ->
+                            Text("· " + c, fontSize = 13.sp)
+                        }
+                    }
+                }
+
+                error?.let {
+                    Text(it, color = Color(0xFFD55245), fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            when (stage) {
+                "preview" -> {
+                    Button(
+                        onClick = {
+                            val ex = extracted ?: return@Button
+                            scope.launch {
+                                val applied = runCatching {
+                                    repository.applySupplement(
+                                        eventId = card.eventId,
+                                        newDeadline = DeadlineParser.parse(ex.deadline, ex.timezone),
+                                        newLocation = ex.location,
+                                        newNote = ex.notes,
+                                        newSummary = ex.summary,
+                                        sourceText = sourceText,
+                                        rawResultJson = rawJson,
+                                        dateOnly = ex.dateOnly,
+                                    )
+                                }.getOrElse {
+                                    error = it.message ?: "合并失败"
+                                    emptyList()
+                                }
+                                if (applied.isNotEmpty()) {
+                                    scheduler.rescheduleAll()
+                                    changes = applied
+                                    stage = "done"
+                                    onApplied(applied)
+                                } else if (error == null) {
+                                    error = "没有需要更新的内容"
+                                }
+                            }
+                        },
+                    ) { Text("确认合并") }
+                }
+                "done" -> {
+                    Button(onClick = onDismiss) { Text("好") }
+                }
+                else -> Unit
+            }
+        },
+        dismissButton = {
+            if (stage != "loading") {
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
+}
+
 @Composable
 private fun DetailDialog(
     card: CountdownCard,
@@ -1413,6 +1809,7 @@ private fun DetailDialog(
     onComplete: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onSupplement: () -> Unit,
 ) {
     val theme = themeFor(card.eventType, card.status == "OVERDUE")
     Dialog(
@@ -1440,6 +1837,9 @@ private fun DetailDialog(
                 ) {
                     DetailIconButton(Icons.Default.Close, "关闭", onDismiss)
                     Spacer(Modifier.weight(1f))
+                    // 补充信息：再提交一次截图，把变更合并进这张卡
+                    DetailIconButton(Icons.Default.AddCircle, "补充信息", onSupplement)
+                    Spacer(Modifier.width(4.dp))
                     DetailIconButton(Icons.Default.Edit, "编辑", onEdit)
                     Spacer(Modifier.width(4.dp))
                     DetailIconButton(Icons.Default.Delete, "删除", onDelete)
@@ -1469,7 +1869,11 @@ private fun DetailDialog(
                     }
                     // 详情页也跟时间走（否则打开着不动，倒计时就一直是旧值）
     val detailTick = rememberSecondTick()
-    val remain = formatRemaining(card.deadlineAt - detailTick)
+    val remain = if (card.isDateOnly()) {
+        formatRemainingDateOnly(card.deadlineAt)
+    } else {
+        formatRemaining(card.deadlineAt - detailTick)
+    }
                     Column(horizontalAlignment = Alignment.End) {
                         Text("还有", color = Color.White.copy(alpha = 0.72f), fontSize = 12.sp)
                         Row(verticalAlignment = Alignment.Bottom) {
@@ -1492,6 +1896,53 @@ private fun DetailDialog(
                             .padding(horizontal = 16.dp)
                             .padding(top = 8.dp, bottom = 4.dp),
                     )
+                }
+
+                // ── 地点：AI 从截图里识别出来的，以前会被丢掉 ──
+                card.location?.takeIf { it.isNotBlank() }?.let { loc ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Default.Place, null,
+                            tint = Color.White.copy(alpha = 0.75f),
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            loc,
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+
+                // ── 补充说明：范围限定、弹性时间等散装信息 ──
+                card.extraNote?.takeIf { it.isNotBlank() }?.let { note ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 2.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Icon(
+                            Icons.Default.Info, null,
+                            tint = Color.White.copy(alpha = 0.7f),
+                            modifier = Modifier.size(14.dp).padding(top = 1.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            note,
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                        )
+                    }
                 }
 
                 // ── 已完成按钮 ──
@@ -1571,10 +2022,26 @@ private fun formatOffset(minutes: Int): String = when {
  * 时间用宽容解析器 —— 手输「2026-10-18 12:00」甚至全角都能认。
  */
 @Composable
-private fun EditDialog(card: CountdownCard, onDismiss: () -> Unit, onSave: (String, String, Long) -> Unit) {
+private fun EditDialog(
+    card: CountdownCard,
+    onDismiss: () -> Unit,
+    onSave: (String, String, Long, Boolean) -> Unit,
+) {
     var title by remember { mutableStateOf(card.title) }
     var summary by remember { mutableStateOf(card.summary) }
-    var deadlineText by remember { mutableStateOf(formatDeadline(card.deadlineAt)) }
+    // 纯日期卡片编辑时只显示日期，不要那个假钟点（23:59 是占位值）
+    val cardIsDateOnly = card.isDateOnly()
+    var deadlineText by remember {
+        mutableStateOf(
+            if (cardIsDateOnly) {
+                java.time.Instant.ofEpochMilli(card.deadlineAt)
+                    .atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+            } else {
+                formatDeadline(card.deadlineAt)
+            },
+        )
+    }
     val parsed = parseDate(deadlineText)
     val deadlineError = when {
         deadlineText.isBlank() -> null
@@ -1606,7 +2073,7 @@ private fun EditDialog(card: CountdownCard, onDismiss: () -> Unit, onSave: (Stri
         },
         confirmButton = {
             Button(
-                onClick = { parsed?.let { onSave(title, summary, it) } },
+                onClick = { parsed?.let { onSave(title, summary, it, inferDateOnlyFromInput(deadlineText)) } },
                 enabled = title.isNotBlank() && deadlineError == null && parsed != null,
             ) { Text("保存修改") }
         },
